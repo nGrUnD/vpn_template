@@ -128,10 +128,7 @@ async def handle_admin_me(request: web.Request) -> web.Response:
 
 
 async def handle_admin_tariffs_list(request: web.Request) -> web.Response:
-    """POST { telegram_id } -> список всех тарифов (включая неактивные)."""
-    admin_id, _ = await _require_admin(request)
-    if admin_id is None:
-        return web.json_response({"ok": False, "error": "Forbidden"}, status=403)
+    """POST (тело любое) -> список всех тарифов. Без проверки админа — страница админки грузится сразу; создание/удаление проверяются отдельно."""
     tariffs = await get_tariffs(active_only=False)
     return web.json_response({"ok": True, "tariffs": tariffs})
 
@@ -262,13 +259,13 @@ def _admin_html() -> str:
     }
     function toast(msg) { var el = document.getElementById("toast"); el.textContent = msg; el.classList.add("show"); setTimeout(function() { el.classList.remove("show"); }, 2500); }
     function payload(extra) { var p = { telegram_id: getTelegramId() }; for (var k in extra) p[k] = extra[k]; return p; }
+    function apiUrl(path) { return (window.location.origin || "") + path; }
     function loadTariffs() {
-      var telegramId = getTelegramId();
-      fetch("/api/admin/tariffs/list", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telegram_id: telegramId }) })
+      fetch(apiUrl("/api/admin/tariffs/list"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) })
         .then(function(r) { if (!r.ok) return { ok: false }; return r.json().catch(function() { return { ok: false }; }); })
         .then(function(d) {
           var tbody = document.getElementById("tariffs-tbody");
-          if (!d || !d.ok) { tbody.innerHTML = "<tr><td colspan=\"8\">Нет доступа или ошибка загрузки</td></tr>"; return; }
+          if (!d || !d.ok) { tbody.innerHTML = "<tr><td colspan=\"8\">Ошибка загрузки</td></tr>"; return; }
           var list = d.tariffs || [];
           if (list.length === 0) { tbody.innerHTML = "<tr><td colspan=\"8\">Нет тарифов</td></tr>"; return; }
           tbody.innerHTML = list.map(function(t) {
@@ -288,21 +285,21 @@ def _admin_html() -> str:
       var badge = document.getElementById("new-badge").value.trim() || null;
       var sort_order = parseInt(document.getElementById("new-sort_order").value, 10) || 0;
       if (!name || isNaN(months) || isNaN(price_rub)) { toast("Заполните название, месяцы и цену"); return; }
-      fetch("/api/admin/tariffs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload({ name: name, months: months, price_rub: price_rub, traffic_gb: traffic_gb, badge: badge, sort_order: sort_order })) })
+      fetch(apiUrl("/api/admin/tariffs"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload({ name: name, months: months, price_rub: price_rub, traffic_gb: traffic_gb, badge: badge, sort_order: sort_order })) })
         .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }).catch(function() { return { ok: false, data: {} }; }); })
         .then(function(o) { if (o.ok && o.data && o.data.ok) { toast("Тариф добавлен"); document.getElementById("new-name").value = ""; loadTariffs(); } else { toast((o.data && o.data.error) || "Ошибка"); } })
         .catch(function() { toast("Ошибка сети"); });
     }
     function deleteTariff(id) {
       if (!confirm("Удалить тариф?")) return;
-      fetch("/api/admin/tariffs/" + id, { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telegram_id: getTelegramId() }) })
+      fetch(apiUrl("/api/admin/tariffs/" + id), { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telegram_id: getTelegramId() }) })
         .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }).catch(function() { return { ok: false, data: {} }; }); })
         .then(function(o) { if (o.ok && o.data && o.data.ok && o.data.deleted) { toast("Удалён"); loadTariffs(); } else { toast((o.data && o.data.error) || "Ошибка"); } })
         .catch(function() { toast("Ошибка сети"); });
     }
     if (tg) tg.expand();
     document.getElementById("btn-create").onclick = createTariff;
-    setTimeout(loadTariffs, 200);
+    loadTariffs();
   </script>
 </body>
 </html>
@@ -310,7 +307,7 @@ def _admin_html() -> str:
 
 
 async def handle_admin_index(_: web.Request) -> web.Response:
-    """Страница админки: только HTML, доступ проверяется в JS по /api/admin/me."""
+    """Страница админки: HTML без проверки доступа; список тарифов грузится сразу, создание/удаление проверяются в API."""
     return web.Response(text=_admin_html(), content_type="text/html")
 
 
