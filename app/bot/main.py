@@ -25,8 +25,8 @@ async def run_bot(bot: Bot, dp: Dispatcher, threexui_client: ThreeXUIClient) -> 
     await dp.start_polling(bot, threexui=threexui_client)
 
 
-async def run_web(threexui_client: ThreeXUIClient, port: int) -> None:
-    app = create_web_app(threexui_client)
+async def run_web(threexui_client: ThreeXUIClient, port: int, admin_ids: list[int]) -> None:
+    app = create_web_app(threexui_client, admin_ids)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host="0.0.0.0", port=port)
@@ -58,13 +58,14 @@ async def main() -> None:
     # использование threexui и webapp_url в хендлерах через аргументы функции.
     dp["threexui"] = threexui_client
     dp["webapp_url"] = config.webapp_url
+    dp["admin_ids"] = config.bot.admin_ids
 
     dp.include_router(basic_router)
 
     try:
         await asyncio.gather(
             run_bot(bot, dp, threexui_client),
-            run_web(threexui_client, config.webapp_port),
+            run_web(threexui_client, config.webapp_port, config.bot.admin_ids),
         )
     finally:
         await threexui_client.close()

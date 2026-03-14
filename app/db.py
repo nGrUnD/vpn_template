@@ -49,6 +49,37 @@ async def init_db(db_config: DatabaseConfig) -> None:
             """
         )
 
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tariffs (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                months INT NOT NULL,
+                price_rub INT NOT NULL,
+                traffic_gb INT NOT NULL DEFAULT 0,
+                badge TEXT,
+                sort_order INT NOT NULL DEFAULT 0,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            """
+        )
+
+        # Дефолтные тарифы при первом запуске
+        n = await conn.fetchval("SELECT COUNT(*) FROM tariffs")
+        if n == 0:
+            await conn.executemany(
+                """
+                INSERT INTO tariffs (name, months, price_rub, traffic_gb, badge, sort_order)
+                VALUES ($1, $2, $3, $4, $5, $6);
+                """,
+                [
+                    ("1 месяц", 1, 300, 30, None, 0),
+                    ("3 месяца", 3, 750, 100, "−17%", 1),
+                    ("12 месяцев", 12, 2400, 500, "−33%", 2),
+                ],
+            )
+
 
 async def get_pool() -> asyncpg.Pool:
     if _pool is None:

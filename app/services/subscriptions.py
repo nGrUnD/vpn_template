@@ -9,6 +9,23 @@ from app.db import get_pool
 from app.threexui_client import ThreeXUIClient, ThreeXUIClientInfo
 
 
+async def get_active_subscriptions_by_telegram_id(telegram_id: int) -> list[asyncpg.Record]:
+    """Список активных подписок пользователя по telegram_id."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT s.id, s.server_label, s.config, s.is_active, s.expires_at, s.created_at
+            FROM subscriptions s
+            JOIN users u ON u.id = s.user_id
+            WHERE u.telegram_id = $1 AND s.is_active = TRUE AND (s.expires_at IS NULL OR s.expires_at > NOW())
+            ORDER BY s.created_at DESC;
+            """,
+            telegram_id,
+        )
+    return list(rows)
+
+
 async def create_test_subscription(
     db_user_id: int,
     telegram_id: int,
