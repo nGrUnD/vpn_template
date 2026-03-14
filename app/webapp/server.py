@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from html import escape
 from typing import Any, Dict, List
 
 from aiohttp import web
@@ -198,8 +199,44 @@ async def handle_admin_tariffs_delete(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "deleted": deleted})
 
 
-def _admin_html() -> str:
-    return """
+def _admin_html(tariffs: List[Dict[str, Any]], status: str | None = None, error: str | None = None) -> str:
+    rows_html = "".join(
+        (
+            "<tr>"
+            f"<td>{t['id']}</td>"
+            f"<td>{escape(str(t.get('name') or ''))}</td>"
+            f"<td>{t['months']}</td>"
+            f"<td>{t['price_rub']}</td>"
+            f"<td>{t['traffic_gb']}</td>"
+            f"<td>{escape(str(t.get('badge') or ''))}</td>"
+            f"<td>{'да' if t.get('is_active') else 'нет'}</td>"
+            "<td>"
+            f"<form method=\"post\" action=\"/admin/tariffs/{t['id']}/delete\" class=\"inline-form\" onsubmit=\"return confirm('Удалить тариф?');\">"
+            "<button type=\"submit\" class=\"danger\">Удалить</button>"
+            "</form>"
+            "</td>"
+            "</tr>"
+        )
+        for t in tariffs
+    )
+    if not rows_html:
+        rows_html = '<tr><td colspan="8">Нет тарифов</td></tr>'
+
+    notice_html = ""
+    if status == "created":
+        notice_html = '<div class="notice success">Тариф добавлен</div>'
+    elif status == "deleted":
+        notice_html = '<div class="notice success">Тариф удален</div>'
+    elif error == "required":
+        notice_html = '<div class="notice error">Заполните название, месяцы и цену</div>'
+    elif error == "invalid":
+        notice_html = '<div class="notice error">Поля месяцев, цены, трафика и порядка должны быть числами</div>'
+    elif error == "not_found":
+        notice_html = '<div class="notice error">Тариф не найден</div>'
+    elif error == "server":
+        notice_html = '<div class="notice error">Внутренняя ошибка сервера</div>'
+
+    return f"""
 <!doctype html>
 <html lang="ru">
 <head>
@@ -221,94 +258,93 @@ def _admin_html() -> str:
     .form-row label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 4px; }
     .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     .card { background: #1e293b; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
-    .toast { position: fixed; bottom: 24px; left: 16px; right: 16px; background: #1e293b; padding: 12px; text-align: center; border-radius: 12px; display: none; }
-    .toast.show { display: block; }
+    .notice { border-radius: 12px; padding: 12px 14px; margin-bottom: 16px; }
+    .notice.success { background: #052e16; color: #86efac; border: 1px solid #166534; }
+    .notice.error { background: #450a0a; color: #fca5a5; border: 1px solid #991b1b; }
+    .inline-form { display: inline; margin: 0; }
   </style>
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
   <div class="header" style="display:flex;align-items:center;gap:12px;">
     <a href="/" style="color:var(--hint,#94a3b8);text-decoration:none;font-size:14px;">← В приложение</a>
     <span>Админ-панель</span>
   </div>
+  {notice_html}
   <div id="content">
-    <div class="card">
+    <form class="card" method="post" action="/admin/tariffs/create">
       <div style="margin-bottom:12px;font-weight:600;">Добавить тариф</div>
       <div class="form-grid">
-        <div class="form-row"><label>Название</label><input type="text" id="new-name" placeholder="1 месяц" /></div>
-        <div class="form-row"><label>Месяцев</label><input type="number" id="new-months" min="1" value="1" /></div>
-        <div class="form-row"><label>Цена (₽)</label><input type="number" id="new-price_rub" min="0" value="300" /></div>
-        <div class="form-row"><label>Трафик (GB)</label><input type="number" id="new-traffic_gb" min="0" value="30" /></div>
-        <div class="form-row"><label>Бейдж</label><input type="text" id="new-badge" placeholder="−17%" /></div>
-        <div class="form-row"><label>Порядок</label><input type="number" id="new-sort_order" value="0" /></div>
+        <div class="form-row"><label>Название</label><input type="text" name="name" placeholder="1 месяц" /></div>
+        <div class="form-row"><label>Месяцев</label><input type="number" name="months" min="1" value="1" /></div>
+        <div class="form-row"><label>Цена (₽)</label><input type="number" name="price_rub" min="0" value="300" /></div>
+        <div class="form-row"><label>Трафик (GB)</label><input type="number" name="traffic_gb" min="0" value="30" /></div>
+        <div class="form-row"><label>Бейдж</label><input type="text" name="badge" placeholder="-17%" /></div>
+        <div class="form-row"><label>Порядок</label><input type="number" name="sort_order" value="0" /></div>
       </div>
-      <button type="button" class="primary" id="btn-create">Добавить</button>
-    </div>
+      <button type="submit" class="primary">Добавить</button>
+    </form>
     <div class="card">
       <div style="margin-bottom:12px;font-weight:600;">Тарифы</div>
-      <table><thead><tr><th>ID</th><th>Название</th><th>Мес</th><th>₽</th><th>GB</th><th>Бейдж</th><th>Активен</th><th></th></tr></thead><tbody id="tariffs-tbody"></tbody></table>
+      <table><thead><tr><th>ID</th><th>Название</th><th>Мес</th><th>₽</th><th>GB</th><th>Бейдж</th><th>Активен</th><th></th></tr></thead><tbody>{rows_html}</tbody></table>
     </div>
   </div>
-  <div class="toast" id="toast"></div>
-  <script>
-    var tg = window.Telegram && window.Telegram.WebApp;
-    function getTelegramId() {
-      var t = window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initDataUnsafe && window.Telegram.WebApp.initDataUnsafe.user;
-      var id = t ? t.id : null;
-      return id != null ? Number(id) : null;
-    }
-    function toast(msg) { var el = document.getElementById("toast"); el.textContent = msg; el.classList.add("show"); setTimeout(function() { el.classList.remove("show"); }, 2500); }
-    function payload(extra) { var p = { telegram_id: getTelegramId() }; for (var k in extra) p[k] = extra[k]; return p; }
-    function apiUrl(path) { return (window.location.origin || "") + path; }
-    function loadTariffs() {
-      fetch(apiUrl("/api/admin/tariffs/list"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) })
-        .then(function(r) { if (!r.ok) return { ok: false }; return r.json().catch(function() { return { ok: false }; }); })
-        .then(function(d) {
-          var tbody = document.getElementById("tariffs-tbody");
-          if (!d || !d.ok) { tbody.innerHTML = "<tr><td colspan=\"8\">Ошибка загрузки</td></tr>"; return; }
-          var list = d.tariffs || [];
-          if (list.length === 0) { tbody.innerHTML = "<tr><td colspan=\"8\">Нет тарифов</td></tr>"; return; }
-          tbody.innerHTML = list.map(function(t) {
-            return "<tr><td>" + t.id + "</td><td>" + (t.name || "") + "</td><td>" + t.months + "</td><td>" + t.price_rub + "</td><td>" + t.traffic_gb + "</td><td>" + (t.badge || "") + "</td><td>" + (t.is_active ? "да" : "нет") + "</td><td><button class=\"danger\" data-id=\"" + t.id + "\">Удалить</button></td></tr>";
-          }).join("");
-          tbody.querySelectorAll("button").forEach(function(btn) {
-            btn.onclick = function() { deleteTariff(parseInt(btn.dataset.id, 10)); };
-          });
-        })
-        .catch(function() { var tbody = document.getElementById("tariffs-tbody"); if (tbody) tbody.innerHTML = "<tr><td colspan=\"8\">Ошибка сети</td></tr>"; });
-    }
-    function createTariff() {
-      var name = document.getElementById("new-name").value.trim();
-      var months = parseInt(document.getElementById("new-months").value, 10);
-      var price_rub = parseInt(document.getElementById("new-price_rub").value, 10);
-      var traffic_gb = parseInt(document.getElementById("new-traffic_gb").value, 10) || 0;
-      var badge = document.getElementById("new-badge").value.trim() || null;
-      var sort_order = parseInt(document.getElementById("new-sort_order").value, 10) || 0;
-      if (!name || isNaN(months) || isNaN(price_rub)) { toast("Заполните название, месяцы и цену"); return; }
-      fetch(apiUrl("/api/admin/tariffs"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload({ name: name, months: months, price_rub: price_rub, traffic_gb: traffic_gb, badge: badge, sort_order: sort_order })) })
-        .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }).catch(function() { return { ok: false, data: {} }; }); })
-        .then(function(o) { if (o.ok && o.data && o.data.ok) { toast("Тариф добавлен"); document.getElementById("new-name").value = ""; loadTariffs(); } else { toast((o.data && o.data.error) || "Ошибка"); } })
-        .catch(function() { toast("Ошибка сети"); });
-    }
-    function deleteTariff(id) {
-      if (!confirm("Удалить тариф?")) return;
-      fetch(apiUrl("/api/admin/tariffs/" + id), { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telegram_id: getTelegramId() }) })
-        .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }).catch(function() { return { ok: false, data: {} }; }); })
-        .then(function(o) { if (o.ok && o.data && o.data.ok && o.data.deleted) { toast("Удалён"); loadTariffs(); } else { toast((o.data && o.data.error) || "Ошибка"); } })
-        .catch(function() { toast("Ошибка сети"); });
-    }
-    if (tg) tg.expand();
-    document.getElementById("btn-create").onclick = createTariff;
-    loadTariffs();
-  </script>
 </body>
 </html>
 """
 
 
-async def handle_admin_index(_: web.Request) -> web.Response:
-    """Страница админки: HTML без проверки доступа; список тарифов грузится сразу, создание/удаление проверяются в API."""
-    return web.Response(text=_admin_html(), content_type="text/html")
+async def handle_admin_index(request: web.Request) -> web.Response:
+    """Страница админки: полностью серверный рендер без JS-зависимости."""
+    tariffs = await get_tariffs(active_only=False)
+    return web.Response(
+        text=_admin_html(
+            tariffs=tariffs,
+            status=request.query.get("status"),
+            error=request.query.get("error"),
+        ),
+        content_type="text/html",
+    )
+
+
+async def handle_admin_page_tariffs_create(request: web.Request) -> web.Response:
+    """Создать тариф из обычной HTML-формы без зависимости от Telegram WebApp JS."""
+    data = await request.post()
+    name = (data.get("name") or "").strip()
+    months = data.get("months")
+    price_rub = data.get("price_rub")
+    if not name or months is None or price_rub is None:
+        raise web.HTTPSeeOther("/admin?error=required")
+    try:
+        traffic_gb = int(data.get("traffic_gb") or 0)
+        sort_order = int(data.get("sort_order") or 0)
+        await create_tariff(
+            name=name,
+            months=int(months),
+            price_rub=int(price_rub),
+            traffic_gb=traffic_gb,
+            badge=((data.get("badge") or "").strip() or None),
+            sort_order=sort_order,
+        )
+    except ValueError:
+        raise web.HTTPSeeOther("/admin?error=invalid")
+    except Exception:
+        raise web.HTTPSeeOther("/admin?error=server")
+    raise web.HTTPSeeOther("/admin?status=created")
+
+
+async def handle_admin_page_tariffs_delete(request: web.Request) -> web.Response:
+    """Удалить тариф из обычной HTML-формы без зависимости от Telegram WebApp JS."""
+    try:
+        tariff_id = int(request.match_info["id"])
+    except (KeyError, TypeError, ValueError):
+        raise web.HTTPSeeOther("/admin?error=not_found")
+    try:
+        deleted = await delete_tariff(tariff_id)
+    except Exception:
+        raise web.HTTPSeeOther("/admin?error=server")
+    if not deleted:
+        raise web.HTTPSeeOther("/admin?error=not_found")
+    raise web.HTTPSeeOther("/admin?status=deleted")
 
 
 async def handle_index(request: web.Request) -> web.Response:
@@ -555,6 +591,8 @@ def create_web_app(threexui: ThreeXUIClient, admin_ids: List[int] | None = None)
     app.router.add_post("/api/create-test-client", handle_create_test_client)
     # Admin
     app.router.add_get("/admin", handle_admin_index)
+    app.router.add_post("/admin/tariffs/create", handle_admin_page_tariffs_create)
+    app.router.add_post("/admin/tariffs/{id}/delete", handle_admin_page_tariffs_delete)
     app.router.add_post("/api/admin/me", handle_admin_me)
     app.router.add_post("/api/admin/tariffs/list", handle_admin_tariffs_list)
     app.router.add_post("/api/admin/tariffs", handle_admin_tariffs_create)
