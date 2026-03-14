@@ -236,7 +236,7 @@ def _admin_html(tariffs: List[Dict[str, Any]], status: str | None = None, error:
     elif error == "server":
         notice_html = '<div class="notice error">Внутренняя ошибка сервера</div>'
 
-    return f"""
+    html = """
 <!doctype html>
 <html lang="ru">
 <head>
@@ -269,7 +269,7 @@ def _admin_html(tariffs: List[Dict[str, Any]], status: str | None = None, error:
     <a href="/" style="color:var(--hint,#94a3b8);text-decoration:none;font-size:14px;">← В приложение</a>
     <span>Админ-панель</span>
   </div>
-  {notice_html}
+  __NOTICE_HTML__
   <div id="content">
     <form class="card" method="post" action="/admin/tariffs/create">
       <div style="margin-bottom:12px;font-weight:600;">Добавить тариф</div>
@@ -285,12 +285,13 @@ def _admin_html(tariffs: List[Dict[str, Any]], status: str | None = None, error:
     </form>
     <div class="card">
       <div style="margin-bottom:12px;font-weight:600;">Тарифы</div>
-      <table><thead><tr><th>ID</th><th>Название</th><th>Мес</th><th>₽</th><th>GB</th><th>Бейдж</th><th>Активен</th><th></th></tr></thead><tbody>{rows_html}</tbody></table>
+      <table><thead><tr><th>ID</th><th>Название</th><th>Мес</th><th>₽</th><th>GB</th><th>Бейдж</th><th>Активен</th><th></th></tr></thead><tbody>__ROWS_HTML__</tbody></table>
     </div>
   </div>
 </body>
 </html>
 """
+    return html.replace("__NOTICE_HTML__", notice_html).replace("__ROWS_HTML__", rows_html)
 
 
 async def handle_admin_index(request: web.Request) -> web.Response:
