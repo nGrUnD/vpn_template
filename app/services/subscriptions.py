@@ -31,15 +31,16 @@ async def get_active_subscriptions_by_telegram_id(
                 s.threexui_client_id,
                 s.config,
                 s.device_os,
-                s.tariff_id,
-                COALESCE(s.tariff_price_stars, s.tariff_price_rub) AS tariff_price_stars,
-                s.tariff_months,
-                s.tariff_traffic_gb,
+                COALESCE(s.tariff_id, t.id) AS tariff_id,
+                COALESCE(s.tariff_price_stars, s.tariff_price_rub, t.price_stars, t.price_rub) AS tariff_price_stars,
+                COALESCE(s.tariff_months, t.months) AS tariff_months,
+                COALESCE(s.tariff_traffic_gb, t.traffic_gb) AS tariff_traffic_gb,
                 s.is_active,
                 s.expires_at,
                 s.created_at
             FROM subscriptions s
             JOIN users u ON u.id = s.user_id
+            LEFT JOIN tariffs t ON t.id = s.tariff_id OR (s.tariff_id IS NULL AND t.name = s.server_label)
             WHERE u.telegram_id = $1 AND s.is_active = TRUE AND (s.expires_at IS NULL OR s.expires_at > NOW())
             ORDER BY s.created_at DESC;
             """,
@@ -170,9 +171,13 @@ async def get_subscription_for_user(subscription_id: int, telegram_id: int) -> O
             """
             SELECT
                 s.*,
-                u.telegram_id
+                u.telegram_id,
+                COALESCE(s.tariff_price_stars, s.tariff_price_rub, t.price_stars, t.price_rub) AS effective_tariff_price_stars,
+                COALESCE(s.tariff_months, t.months) AS effective_tariff_months,
+                COALESCE(s.tariff_traffic_gb, t.traffic_gb) AS effective_tariff_traffic_gb
             FROM subscriptions s
             JOIN users u ON u.id = s.user_id
+            LEFT JOIN tariffs t ON t.id = s.tariff_id OR (s.tariff_id IS NULL AND t.name = s.server_label)
             WHERE s.id = $1 AND u.telegram_id = $2
             """,
             subscription_id,
@@ -193,8 +198,8 @@ async def extend_subscription_for_user(
         if not row:
             return None
 
-        months = int(row["tariff_months"] or 0)
-        traffic_gb = int(row["tariff_traffic_gb"] or 0)
+        months = int(row["effective_tariff_months"] or 0)
+        traffic_gb = int(row["effective_tariff_traffic_gb"] or 0)
         client_id = row["threexui_client_id"]
         if months <= 0 or not client_id:
             return None

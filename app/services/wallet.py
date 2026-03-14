@@ -15,7 +15,7 @@ async def get_wallet_summary(user_id: int) -> dict:
             """
             SELECT id, kind, status, amount, currency, provider_amount, provider_currency, description, created_at, paid_at
             FROM wallet_transactions
-            WHERE user_id = $1
+            WHERE user_id = $1 AND status = 'paid'
             ORDER BY created_at DESC
             LIMIT 20
             """,
@@ -39,6 +39,20 @@ async def get_wallet_summary(user_id: int) -> dict:
             for row in tx_rows
         ],
     }
+
+
+async def cancel_pending_topup(payload: str) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE wallet_transactions
+            SET status = 'cancelled'
+            WHERE payload = $1 AND kind = 'topup' AND status = 'pending'
+            """,
+            payload,
+        )
+    return result == "UPDATE 1"
 
 
 async def create_pending_topup(

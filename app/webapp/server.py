@@ -23,6 +23,7 @@ from app.services.tariffs import (
 )
 from app.services.users import get_or_create_user_by_telegram_id
 from app.services.wallet import (
+    cancel_pending_topup,
     create_pending_topup,
     get_wallet_summary,
     refund_purchase,
@@ -107,20 +108,38 @@ async def handle_my_configs(request: web.Request) -> web.Response:
     telegram_id = int(telegram_id)
     threexui = request.app.get("threexui")
     rows = await get_active_subscriptions_by_telegram_id(telegram_id, threexui=threexui)
-    configs = [
-        {
-            "id": r["id"],
-            "server_label": r["server_label"],
-            "config": r["config"],
-            "device_os": r.get("device_os"),
-            "can_extend": bool(r.get("tariff_price_stars")) and bool(r.get("tariff_months")),
-            "renew_price_stars": r.get("tariff_price_stars"),
-            "renew_months": r.get("tariff_months"),
-            "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
-            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
-        }
-        for r in rows
-    ]
+    configs = []
+    for r in rows:
+        traffic = None
+        if threexui and r.get("threexui_client_id"):
+            try:
+                traffic = await threexui.get_client_traffic(1, r["threexui_client_id"])
+            except Exception:
+                traffic = None
+        traffic_label = "Трафик: неизвестно"
+        if traffic:
+            if traffic.get("is_unlimited"):
+                traffic_label = "Трафик: безлимит"
+            elif traffic.get("remaining_bytes") is not None:
+                remaining_gb = round(float(traffic["remaining_bytes"]) / (1024**3), 2)
+                traffic_label = f"Осталось трафика: {remaining_gb} GB"
+        elif r.get("tariff_traffic_gb") is not None:
+            traffic_label = f"Осталось трафика: {r['tariff_traffic_gb']} GB"
+
+        configs.append(
+            {
+                "id": r["id"],
+                "server_label": r["server_label"],
+                "config": r["config"],
+                "device_os": r.get("device_os"),
+                "can_extend": bool(r.get("tariff_price_stars")) and bool(r.get("tariff_months")),
+                "renew_price_stars": r.get("tariff_price_stars"),
+                "renew_months": r.get("tariff_months"),
+                "traffic_label": traffic_label,
+                "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+        )
     return web.json_response({"ok": True, "configs": configs})
 
 
@@ -201,7 +220,19 @@ async def handle_wallet_create_invoice(request: web.Request) -> web.Response:
         payload=tx["payload"],
         amount=amount_stars,
     )
-    return web.json_response({"ok": True, "invoice_link": invoice_link, "amount_stars": amount_stars})
+    return web.json_response({"ok": True, "invoice_link": invoice_link, "amount_stars": amount_stars, "payload": tx["payload"]})
+
+
+async def handle_wallet_cancel_invoice(request: web.Request) -> web.Response:
+    try:
+        data: Dict[str, Any] = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+    payload = (data.get("payload") or "").strip()
+    if not payload:
+        return web.json_response({"ok": False, "error": "payload is required"}, status=400)
+    cancelled = await cancel_pending_topup(payload)
+    return web.json_response({"ok": True, "cancelled": cancelled})
 
 
 async def handle_purchase_tariff(request: web.Request) -> web.Response:
@@ -284,8 +315,8 @@ async def handle_extend_subscription(request: web.Request) -> web.Response:
     subscription_row = await get_subscription_for_user(subscription_id, telegram_id)
     if not subscription_row:
         return web.json_response({"ok": False, "error": "Подписка не найдена"}, status=404)
-    renew_price_stars = int((subscription_row["tariff_price_stars"] or subscription_row["tariff_price_rub"] or 0))
-    renew_months = int(subscription_row["tariff_months"] or 0)
+    renew_price_stars = int((subscription_row["effective_tariff_price_stars"] or 0))
+    renew_months = int(subscription_row["effective_tariff_months"] or 0)
     if renew_price_stars <= 0 or renew_months <= 0:
         return web.json_response({"ok": False, "error": "Для этой подписки продление пока недоступно"}, status=400)
     ok, balance = await spend_balance_for_purchase(
@@ -674,6 +705,39 @@ async def handle_index(request: web.Request) -> web.Response:
       font-size: 14px;
     }
     .selected-device.show { display: block; }
+    .tariffs-modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(2, 6, 23, 0.82);
+      z-index: 120;
+      padding: 16px;
+      overflow-y: auto;
+    }
+    .tariffs-modal.show { display: block; }
+    .tariffs-modal-card {
+      max-width: 640px;
+      margin: 20px auto 100px auto;
+      background: var(--bg, #0f172a);
+      border: 1px solid var(--border, #334155);
+      border-radius: 18px;
+      padding: 16px;
+    }
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .modal-close {
+      border: 1px solid var(--border, #334155);
+      background: var(--secondary, #1e293b);
+      color: var(--text, #e5e7eb);
+      border-radius: 12px;
+      padding: 8px 12px;
+      cursor: pointer;
+    }
     .tariffs { display: flex; flex-direction: column; gap: 12px; margin-bottom: 24px; }
     .tariff-card {
       background: var(--card-bg, #1e293b);
@@ -807,12 +871,22 @@ async def handle_index(request: web.Request) -> web.Response:
 
     <div class="selected-device" id="selected-device"></div>
 
-    <div class="section-title">Тарифы VPN</div>
-    <div class="tariffs" id="tariffs"></div>
-
     <div class="section-title">Мои устройства</div>
     <div class="configs" id="configs"></div>
     <div class="empty" id="configs-empty" style="display:none;">Нет активных устройств. Нажмите «Добавить устройство», выберите платформу и купите тариф.</div>
+  </div>
+
+  <div class="tariffs-modal" id="tariffs-modal">
+    <div class="tariffs-modal-card">
+      <div class="modal-header">
+        <div>
+          <div class="section-title" style="margin-bottom:6px;">Тарифы VPN</div>
+          <div id="modal-device-title" style="color:var(--hint,#94a3b8);font-size:14px;">Выберите тариф</div>
+        </div>
+        <button type="button" class="modal-close" id="btn-close-tariffs">Выйти</button>
+      </div>
+      <div class="tariffs" id="tariffs"></div>
+    </div>
   </div>
 
   <div class="tab-page" id="tab-wallet">
@@ -902,8 +976,12 @@ async def handle_index(request: web.Request) -> web.Response:
       if (selectedDeviceOs) {
         target.textContent = "Выбрано устройство: " + selectedDeviceOs;
         target.classList.add("show");
+        var modalTitle = document.getElementById("modal-device-title");
+        if (modalTitle) modalTitle.textContent = "Устройство: " + selectedDeviceOs;
       } else {
         target.classList.remove("show");
+        var modalTitleEmpty = document.getElementById("modal-device-title");
+        if (modalTitleEmpty) modalTitleEmpty.textContent = "Выберите тариф";
       }
       document.querySelectorAll(".device-chip").forEach(function(btn) {
         btn.classList.toggle("active", btn.dataset.os === selectedDeviceOs);
@@ -959,11 +1037,12 @@ async def handle_index(request: web.Request) -> web.Response:
           ? '<button type="button" class="renew-btn">Продлить за ' + c.renew_price_stars + ' ⭐</button>'
           : '';
         return '<div class="config-card" data-id="' + c.id + '" data-renew-price="' + (c.renew_price_stars || '') + '" data-renew-months="' + (c.renew_months || '') + '">' +
-          '<div class="label">' + os + (c.server_label || "Конфиг #" + c.id) + '</div>' +
-          '<div class="expires">' + exp + '</div>' +
+          '<div class="label">Конфиг · ' + os + (c.server_label || ("#" + c.id)) + '</div>' +
+          '<div class="expires">1. ' + exp + '</div>' +
+          '<div class="expires">2. ' + (c.traffic_label || "Трафик: неизвестно") + '</div>' +
           '<div class="config-preview">' + preview + '</div>' +
           '<div class="actions">' +
-          '<button type="button" class="primary copy-btn">Скопировать</button>' +
+          '<button type="button" class="primary copy-btn">3. Скопировать</button>' +
           renewBtn +
           '</div></div>';
       }).join("");
@@ -1114,8 +1193,14 @@ async def handle_index(request: web.Request) -> web.Response:
                   loadWallet();
                 }, 1200);
               } else if (status === "cancelled") {
+                if (data.payload) {
+                  apiPost("/api/wallet/cancel-invoice", { payload: data.payload });
+                }
                 toast("Платеж отменен");
               } else if (status === "failed") {
+                if (data.payload) {
+                  apiPost("/api/wallet/cancel-invoice", { payload: data.payload });
+                }
                 toast("Платеж не прошел");
               }
             });
@@ -1129,15 +1214,23 @@ async def handle_index(request: web.Request) -> web.Response:
     document.querySelectorAll(".tab-btn").forEach(function(btn) {
       btn.addEventListener("click", function() { setTab(btn.dataset.tab); });
     });
+    function showTariffsModal() {
+      document.getElementById("tariffs-modal").classList.add("show");
+    }
+    function hideTariffsModal() {
+      document.getElementById("tariffs-modal").classList.remove("show");
+    }
+
     document.getElementById("btn-open-wallet").addEventListener("click", function() { setTab("wallet"); });
     document.getElementById("btn-add-device").addEventListener("click", function() {
       document.getElementById("device-chooser").classList.toggle("show");
     });
+    document.getElementById("btn-close-tariffs").addEventListener("click", hideTariffsModal);
     document.querySelectorAll(".device-chip").forEach(function(btn) {
       btn.addEventListener("click", function() {
         setSelectedDevice(btn.dataset.os);
         document.getElementById("device-chooser").classList.remove("show");
-        loadTariffs();
+        showTariffsModal();
       });
     });
     document.querySelectorAll(".topup-btn").forEach(function(btn) {
@@ -1174,6 +1267,7 @@ def create_web_app(
     app.router.add_post("/api/dashboard", handle_dashboard)
     app.router.add_post("/api/wallet", handle_wallet)
     app.router.add_post("/api/wallet/create-invoice", handle_wallet_create_invoice)
+    app.router.add_post("/api/wallet/cancel-invoice", handle_wallet_cancel_invoice)
     app.router.add_post("/api/purchase-tariff", handle_purchase_tariff)
     app.router.add_post("/api/subscriptions/extend", handle_extend_subscription)
     app.router.add_post("/api/my-configs", handle_my_configs)

@@ -156,6 +156,42 @@ class ThreeXUIClient:
         clients = settings.get("clients") or []
         return clients if isinstance(clients, list) else []
 
+    async def get_client_traffic(self, inbound_id: int, client_uuid: str) -> Optional[dict[str, Any]]:
+        """
+        Вернуть лимит/расход/остаток трафика клиента, если эти поля есть в ответе 3x-ui.
+        """
+        await self._ensure_login()
+        inbound = await self._get_inbound(inbound_id)
+        if not inbound:
+            return None
+        clients = self._extract_clients(inbound)
+        target = next((client for client in clients if client.get("id") == client_uuid), None)
+        if not target:
+            return None
+
+        total_bytes = int(target.get("totalGB") or 0)
+        up_bytes = int(target.get("up") or 0)
+        down_bytes = int(target.get("down") or 0)
+        used_bytes = int(target.get("total") or 0)
+        if used_bytes <= 0:
+            used_bytes = up_bytes + down_bytes
+
+        if total_bytes <= 0:
+            return {
+                "is_unlimited": True,
+                "limit_bytes": 0,
+                "used_bytes": used_bytes,
+                "remaining_bytes": None,
+            }
+
+        remaining = max(total_bytes - used_bytes, 0)
+        return {
+            "is_unlimited": False,
+            "limit_bytes": total_bytes,
+            "used_bytes": used_bytes,
+            "remaining_bytes": remaining,
+        }
+
     def _get_nested(self, d: dict, *keys: str) -> Any:
         """Взять значение по первому существующему ключу (camelCase или snake_case)."""
         for k in keys:
