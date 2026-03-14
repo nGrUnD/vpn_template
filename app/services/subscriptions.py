@@ -190,6 +190,10 @@ async def extend_subscription_for_user(
     subscription_id: int,
     telegram_id: int,
     threexui: ThreeXUIClient,
+    months: int | None = None,
+    traffic_gb: int | None = None,
+    tariff_id: int | None = None,
+    tariff_price_stars: int | None = None,
 ) -> Optional[asyncpg.Record]:
     """Продлить существующую подписку по сохраненным параметрам тарифа."""
     pool = await get_pool()
@@ -198,8 +202,8 @@ async def extend_subscription_for_user(
         if not row:
             return None
 
-        months = int(row["effective_tariff_months"] or 0)
-        traffic_gb = int(row["effective_tariff_traffic_gb"] or 0)
+        months = int(months if months is not None else (row["effective_tariff_months"] or 0))
+        traffic_gb = int(traffic_gb if traffic_gb is not None else (row["effective_tariff_traffic_gb"] or 0))
         client_id = row["threexui_client_id"]
         if months <= 0 or not client_id:
             return None
@@ -221,11 +225,20 @@ async def extend_subscription_for_user(
         return await conn.fetchrow(
             """
             UPDATE subscriptions
-            SET expires_at = $2, is_active = TRUE
+            SET expires_at = $2,
+                is_active = TRUE,
+                tariff_id = COALESCE($3, tariff_id),
+                tariff_price_stars = COALESCE($4, tariff_price_stars),
+                tariff_months = COALESCE($5, tariff_months),
+                tariff_traffic_gb = COALESCE($6, tariff_traffic_gb)
             WHERE id = $1
             RETURNING *
             """,
             subscription_id,
             new_expiry,
+            tariff_id,
+            tariff_price_stars,
+            months,
+            traffic_gb,
         )
 

@@ -303,6 +303,7 @@ async def handle_extend_subscription(request: web.Request) -> web.Response:
 
     telegram_id = int(data.get("telegram_id", 0) or 0)
     subscription_id = int(data.get("subscription_id", 0) or 0)
+    tariff_id = int(data.get("tariff_id", 0) or 0)
     if not telegram_id or not subscription_id:
         return web.json_response({"ok": False, "error": "Invalid renew request"}, status=400)
 
@@ -317,8 +318,18 @@ async def handle_extend_subscription(request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": "Подписка не найдена"}, status=404)
     renew_price_stars = int((subscription_row["effective_tariff_price_stars"] or 0))
     renew_months = int(subscription_row["effective_tariff_months"] or 0)
+    renew_traffic_gb = int(subscription_row["effective_tariff_traffic_gb"] or 0)
+    effective_tariff_id = subscription_row.get("tariff_id")
+    if tariff_id:
+        tariff = await get_tariff_by_id(tariff_id)
+        if not tariff or not tariff["is_active"]:
+            return web.json_response({"ok": False, "error": "Тариф не найден"}, status=404)
+        renew_price_stars = int(tariff["price_stars"])
+        renew_months = int(tariff["months"])
+        renew_traffic_gb = int(tariff["traffic_gb"])
+        effective_tariff_id = int(tariff["id"])
     if renew_price_stars <= 0 or renew_months <= 0:
-        return web.json_response({"ok": False, "error": "Для этой подписки продление пока недоступно"}, status=400)
+        return web.json_response({"ok": False, "error": "Выберите тариф для продления"}, status=400)
     ok, balance = await spend_balance_for_purchase(
         user["id"],
         renew_price_stars,
@@ -332,6 +343,10 @@ async def handle_extend_subscription(request: web.Request) -> web.Response:
             subscription_id=subscription_id,
             telegram_id=telegram_id,
             threexui=request.app["threexui"],
+            months=renew_months,
+            traffic_gb=renew_traffic_gb,
+            tariff_id=effective_tariff_id,
+            tariff_price_stars=renew_price_stars,
         )
     except Exception:
         subscription = None
@@ -869,7 +884,7 @@ async def handle_index(request: web.Request) -> web.Response:
       </div>
     </div>
 
-    <div class="selected-device" id="selected-device"></div>
+  <div class="selected-device" id="selected-device" style="display:none;"></div>
 
     <div class="section-title">Мои устройства</div>
     <div class="configs" id="configs"></div>
@@ -931,6 +946,8 @@ async def handle_index(request: web.Request) -> web.Response:
     const telegramId = user ? user.id : null;
     let selectedDeviceOs = null;
     let currentBalance = 0;
+    let tariffsModalMode = "buy";
+    let renewalSubscriptionId = null;
 
     function toast(msg) {
       const el = document.getElementById("toast");
@@ -972,22 +989,13 @@ async def handle_index(request: web.Request) -> web.Response:
 
     function setSelectedDevice(osName) {
       selectedDeviceOs = osName || null;
-      const target = document.getElementById("selected-device");
-      if (selectedDeviceOs) {
-        target.textContent = "Выбрано устройство: " + selectedDeviceOs;
-        target.classList.add("show");
-        var modalTitle = document.getElementById("modal-device-title");
-        if (modalTitle) modalTitle.textContent = "Устройство: " + selectedDeviceOs;
-      } else {
-        target.classList.remove("show");
-        var modalTitleEmpty = document.getElementById("modal-device-title");
-        if (modalTitleEmpty) modalTitleEmpty.textContent = "Выберите тариф";
-      }
+      var modalTitle = document.getElementById("modal-device-title");
+      if (modalTitle) modalTitle.textContent = selectedDeviceOs ? ("Устройство: " + selectedDeviceOs) : "Выберите тариф";
       document.querySelectorAll(".device-chip").forEach(function(btn) {
         btn.classList.toggle("active", btn.dataset.os === selectedDeviceOs);
       });
       document.querySelectorAll(".tariff-card button").forEach(function(btn) {
-        btn.textContent = selectedDeviceOs ? "Купить для " + selectedDeviceOs : "Сначала выберите устройство";
+        btn.textContent = tariffsModalMode === "renew" ? "Продлить" : "Купить";
       });
     }
 
@@ -1004,16 +1012,23 @@ async def handle_index(request: web.Request) -> web.Response:
       const root = document.getElementById("tariffs");
       root.innerHTML = tariffs.map(function(t) {
         const badge = t.badge ? '<span class="badge">' + t.badge + '</span>' : '';
+        const buttonLabel = tariffsModalMode === "renew" ? "Продлить" : "Купить";
         return '<div class="tariff-card">' +
           '<div class="name">' + t.name + '</div>' +
           '<div class="meta">' + t.months + ' мес. · ' + t.traffic_gb + ' GB трафика</div>' +
           '<div class="price">' + t.price_stars + ' ⭐' + badge + '</div>' +
-          '<button type="button" data-tariff-id="' + t.id + '">' + (selectedDeviceOs ? ('Купить для ' + selectedDeviceOs) : 'Сначала выберите устройство') + '</button>' +
+          '<button type="button" data-tariff-id="' + t.id + '">' + buttonLabel + '</button>' +
           '<div class="hint">Списывается со Stars-баланса</div>' +
           '</div>';
       }).join("");
       root.querySelectorAll("button").forEach(function(btn) {
-        btn.addEventListener("click", function() { buyTariff(btn, btn.dataset.tariffId); });
+        btn.addEventListener("click", function() {
+          if (tariffsModalMode === "renew") {
+            renewSubscription(btn, renewalSubscriptionId, btn.dataset.tariffId);
+          } else {
+            buyTariff(btn, btn.dataset.tariffId);
+          }
+        });
       });
     }
 
@@ -1033,16 +1048,14 @@ async def handle_index(request: web.Request) -> web.Response:
         const exp = c.expires_at ? "До " + new Date(c.expires_at).toLocaleDateString("ru") : "Без срока";
         const preview = (c.config || "").substring(0, 60) + (c.config && c.config.length > 60 ? "…" : "");
         const os = c.device_os ? c.device_os + " · " : "";
-        var renewBtn = c.can_extend
-          ? '<button type="button" class="renew-btn">Продлить за ' + c.renew_price_stars + ' ⭐</button>'
-          : '';
+        var renewBtn = '<button type="button" class="renew-btn">Продлить</button>';
         return '<div class="config-card" data-id="' + c.id + '" data-renew-price="' + (c.renew_price_stars || '') + '" data-renew-months="' + (c.renew_months || '') + '">' +
           '<div class="label">Конфиг · ' + os + (c.server_label || ("#" + c.id)) + '</div>' +
           '<div class="expires">1. ' + exp + '</div>' +
           '<div class="expires">2. ' + (c.traffic_label || "Трафик: неизвестно") + '</div>' +
           '<div class="config-preview">' + preview + '</div>' +
           '<div class="actions">' +
-          '<button type="button" class="primary copy-btn">3. Скопировать</button>' +
+          '<button type="button" class="primary copy-btn">Скопировать</button>' +
           renewBtn +
           '</div></div>';
       }).join("");
@@ -1057,7 +1070,11 @@ async def handle_index(request: web.Request) -> web.Response:
       root.querySelectorAll(".renew-btn").forEach(function(btn) {
         btn.addEventListener("click", function() {
           const card = btn.closest(".config-card");
-          renewSubscription(btn, parseInt(card.getAttribute("data-id"), 10));
+          renewalSubscriptionId = parseInt(card.getAttribute("data-id"), 10);
+          tariffsModalMode = "renew";
+          var modalTitle = document.getElementById("modal-device-title");
+          if (modalTitle) modalTitle.textContent = "Продление конфигурации";
+          showTariffsModal();
         });
       });
     }
@@ -1141,6 +1158,7 @@ async def handle_index(request: web.Request) -> web.Response:
           btn.disabled = false;
           if (data.ok) {
             toast("Устройство добавлено");
+            hideTariffsModal();
             loadDashboard();
             loadWallet();
             loadConfigs();
@@ -1155,14 +1173,15 @@ async def handle_index(request: web.Request) -> web.Response:
         });
     }
 
-    function renewSubscription(btn, subscriptionId) {
+    function renewSubscription(btn, subscriptionId, tariffId) {
       if (!telegramId) { toast("Ошибка: нет данных пользователя"); return; }
       btn.disabled = true;
-      apiPost("/api/subscriptions/extend", payloadBase({ subscription_id: subscriptionId }))
+      apiPost("/api/subscriptions/extend", payloadBase({ subscription_id: subscriptionId, tariff_id: parseInt(tariffId, 10) }))
         .then(function(data) {
           btn.disabled = false;
           if (data.ok) {
             toast("Подписка продлена");
+            hideTariffsModal();
             loadDashboard();
             loadWallet();
             loadConfigs();
@@ -1216,9 +1235,14 @@ async def handle_index(request: web.Request) -> web.Response:
     });
     function showTariffsModal() {
       document.getElementById("tariffs-modal").classList.add("show");
+      loadTariffs();
     }
     function hideTariffsModal() {
       document.getElementById("tariffs-modal").classList.remove("show");
+      tariffsModalMode = "buy";
+      renewalSubscriptionId = null;
+      var modalTitle = document.getElementById("modal-device-title");
+      if (modalTitle) modalTitle.textContent = selectedDeviceOs ? ("Устройство: " + selectedDeviceOs) : "Выберите тариф";
     }
 
     document.getElementById("btn-open-wallet").addEventListener("click", function() { setTab("wallet"); });
@@ -1230,6 +1254,8 @@ async def handle_index(request: web.Request) -> web.Response:
       btn.addEventListener("click", function() {
         setSelectedDevice(btn.dataset.os);
         document.getElementById("device-chooser").classList.remove("show");
+        tariffsModalMode = "buy";
+        renewalSubscriptionId = null;
         showTariffsModal();
       });
     });
