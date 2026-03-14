@@ -109,6 +109,13 @@ async def handle_my_configs(request: web.Request) -> web.Response:
     threexui = request.app.get("threexui")
     rows = await get_active_subscriptions_by_telegram_id(telegram_id, threexui=threexui)
     configs = []
+
+    def format_gb(value: float) -> str:
+        rounded = round(float(value), 2)
+        if rounded.is_integer():
+            return f"{int(rounded)} GB"
+        return f"{rounded:.2f}".rstrip("0").rstrip(".") + " GB"
+
     for r in rows:
         traffic = None
         if threexui and r.get("threexui_client_id"):
@@ -116,15 +123,15 @@ async def handle_my_configs(request: web.Request) -> web.Response:
                 traffic = await threexui.get_client_traffic(1, r["threexui_client_id"])
             except Exception:
                 traffic = None
-        traffic_label = "Трафик: неизвестно"
+        traffic_value = "Неизвестно"
         if traffic:
             if traffic.get("is_unlimited"):
-                traffic_label = "Трафик: безлимит"
+                traffic_value = "Безлимит"
             elif traffic.get("remaining_bytes") is not None:
-                remaining_gb = round(float(traffic["remaining_bytes"]) / (1024**3), 2)
-                traffic_label = f"Осталось трафика: {remaining_gb} GB"
+                remaining_gb = float(traffic["remaining_bytes"]) / (1024**3)
+                traffic_value = format_gb(remaining_gb)
         elif r.get("tariff_traffic_gb") is not None:
-            traffic_label = f"Осталось трафика: {r['tariff_traffic_gb']} GB"
+            traffic_value = format_gb(float(r["tariff_traffic_gb"]))
 
         configs.append(
             {
@@ -135,7 +142,7 @@ async def handle_my_configs(request: web.Request) -> web.Response:
                 "can_extend": bool(r.get("tariff_price_stars")) and bool(r.get("tariff_months")),
                 "renew_price_stars": r.get("tariff_price_stars"),
                 "renew_months": r.get("tariff_months"),
-                "traffic_label": traffic_label,
+                "traffic_value": traffic_value,
                 "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
             }
@@ -785,7 +792,19 @@ async def handle_index(request: web.Request) -> web.Response:
       border: 1px solid var(--border, #334155);
     }
     .config-card .label { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
-    .config-card .expires { font-size: 12px; color: var(--hint, #94a3b8); margin-bottom: 8px; }
+    .config-card .details { margin: 10px 0; display: grid; gap: 8px; }
+    .config-card .detail-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: rgba(15, 23, 42, 0.55);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+    }
+    .config-card .detail-label { font-size: 12px; color: #cbd5e1; }
+    .config-card .detail-value { font-size: 13px; font-weight: 700; color: #f8fafc; }
     .config-card .config-preview { font-size: 11px; color: var(--hint); word-break: break-all; max-height: 40px; overflow: hidden; }
     .config-card .actions { margin-top: 10px; display: flex; gap: 8px; }
     .config-card .actions button {
@@ -883,8 +902,6 @@ async def handle_index(request: web.Request) -> web.Response:
         <button type="button" class="device-chip" data-os="Android">Android</button>
       </div>
     </div>
-
-  <div class="selected-device" id="selected-device" style="display:none;"></div>
 
     <div class="section-title">Мои устройства</div>
     <div class="configs" id="configs"></div>
@@ -1051,8 +1068,10 @@ async def handle_index(request: web.Request) -> web.Response:
         var renewBtn = '<button type="button" class="renew-btn">Продлить</button>';
         return '<div class="config-card" data-id="' + c.id + '" data-renew-price="' + (c.renew_price_stars || '') + '" data-renew-months="' + (c.renew_months || '') + '">' +
           '<div class="label">Конфиг · ' + os + (c.server_label || ("#" + c.id)) + '</div>' +
-          '<div class="expires">1. ' + exp + '</div>' +
-          '<div class="expires">2. ' + (c.traffic_label || "Трафик: неизвестно") + '</div>' +
+          '<div class="details">' +
+          '<div class="detail-row"><span class="detail-label">Действует до</span><span class="detail-value">' + exp + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">Осталось трафика</span><span class="detail-value">' + (c.traffic_value || "Неизвестно") + '</span></div>' +
+          '</div>' +
           '<div class="config-preview">' + preview + '</div>' +
           '<div class="actions">' +
           '<button type="button" class="primary copy-btn">Скопировать</button>' +

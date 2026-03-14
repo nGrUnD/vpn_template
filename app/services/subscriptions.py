@@ -12,6 +12,36 @@ from app.threexui_client import ThreeXUIClient, ThreeXUIClientInfo
 INBOUND_ID_FOR_SYNC = 1
 
 
+def _build_device_label(device_os: str | None, sequence: int) -> str | None:
+    if not device_os:
+        return None
+    return device_os if sequence <= 1 else f"{device_os} {sequence}"
+
+
+def _build_device_remark(telegram_id: int, device_os: str | None, sequence: int) -> str:
+    if not device_os:
+        return f"vpn_{telegram_id}"
+    normalized = "".join(ch.lower() if ch.isalnum() else "_" for ch in device_os).strip("_") or "device"
+    return f"vpn_{telegram_id}_{normalized}_{sequence}"
+
+
+async def _next_device_sequence(db_user_id: int, device_os: str | None) -> int:
+    if not device_os:
+        return 1
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        count = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM subscriptions
+            WHERE user_id = $1 AND device_os = $2
+            """,
+            db_user_id,
+            device_os,
+        )
+    return int(count or 0) + 1
+
+
 async def get_active_subscriptions_by_telegram_id(
     telegram_id: int,
     threexui: ThreeXUIClient | None = None,
@@ -119,12 +149,13 @@ async def create_subscription_from_tariff(
     """Создать обычную VPN-подписку по тарифу."""
     expire_days = max(int(months), 1) * 30
     total_gb = int(traffic_gb or 0)
-    os_suffix = f"_{device_os.lower()}" if device_os else ""
+    device_sequence = await _next_device_sequence(db_user_id, device_os)
+    device_label = _build_device_label(device_os, device_sequence)
     client_info: ThreeXUIClientInfo = await threexui.create_vless_client(
         telegram_id=telegram_id,
         expire_days=expire_days,
         total_gb=total_gb,
-        remark=f"vpn_{telegram_id}{os_suffix}",
+        remark=_build_device_remark(telegram_id, device_os, device_sequence),
     )
 
     expires_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=expire_days)
@@ -150,7 +181,7 @@ async def create_subscription_from_tariff(
             RETURNING *;
             """,
             db_user_id,
-            tariff_name,
+            device_label or tariff_name,
             client_info.client_id,
             client_info.config_text,
             expires_at,
