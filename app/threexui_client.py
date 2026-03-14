@@ -172,12 +172,20 @@ class ThreeXUIClient:
             port = int(port) if isinstance(port, (int, float)) else None
             if port is None:
                 return None
-            # Хост: listen "0.0.0.0" или пустой — берём из base_url панели
-            host = listen if listen and listen not in ("0.0.0.0", "::") else None
-            if not host:
-                base = getattr(self._config, "base_url", "") or ""
-                parsed = urllib.parse.urlparse(base)
-                host = parsed.hostname or "localhost"
+            # Хост и порт для клиента: в панели инбаунд может слушать 8443 (внутренний xray),
+            # а снаружи клиенты подключаются к 443 через nginx/stream. Задаём в .env VLESS_SERVER и VLESS_PORT.
+            client_port = getattr(self._config, "vless_port", None)
+            if client_port is not None:
+                port = int(client_port)
+            client_host = getattr(self._config, "vless_server", None) or None
+            if client_host:
+                host = client_host
+            else:
+                host = listen if listen and listen not in ("0.0.0.0", "::") else None
+                if not host:
+                    base = getattr(self._config, "base_url", "") or ""
+                    parsed = urllib.parse.urlparse(base)
+                    host = parsed.hostname or "localhost"
             # streamSettings может быть stream_settings (snake_case) или строка JSON
             stream_raw = self._get_nested(obj, "streamSettings", "stream_settings") or "{}"
             if isinstance(stream_raw, str):
