@@ -273,17 +273,19 @@ def _admin_html() -> str:
         return;
       }
       setStatus("<span style=\"color:#94a3b8;\">Проверка доступа…</span>");
-      var base = (typeof window !== "undefined" && window.location && window.location.origin) ? window.location.origin : "";
-      var url = base + "/api/admin/me";
-      var body = JSON.stringify({ telegram_id: telegramId });
-      var timeout = 12000;
-      var controller = new AbortController();
-      var tid = setTimeout(function() { controller.abort(); }, timeout);
-      fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: body, signal: controller.signal })
+      var resolved = false;
+      var timeoutMs = 12000;
+      var fallbackTid = setTimeout(function() {
+        if (resolved) return;
+        resolved = true;
+        showError("Таймаут. Запрос не дошёл до сервера (12 сек). Откройте админку из Telegram (кнопка «Админ-панель»).<br/><br/>Ваш ID: " + telegramId + ".");
+      }, timeoutMs);
+      function done() { if (!resolved) { resolved = true; clearTimeout(fallbackTid); } }
+      fetch("/api/admin/me", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telegram_id: telegramId }) })
         .then(function(r) {
-          clearTimeout(tid);
+          done();
           if (!r.ok) { throw new Error("HTTP " + r.status); }
-          return r.json().catch(function() { throw new Error("Неверный ответ сервера"); });
+          return r.json().catch(function() { throw new Error("Неверный ответ"); });
         })
         .then(function(d) {
           if (d && d.ok && d.is_admin) {
@@ -291,13 +293,13 @@ def _admin_html() -> str:
             contentEl.style.display = "block";
             loadTariffs();
           } else {
-            showError("Доступ только для администраторов.<br/><br/><strong>Ваш Telegram ID:</strong> " + telegramId + "<br/>Добавьте его в <code>BOT_ADMIN_IDS</code> в файле .env на сервере и перезапустите бота.");
+            showError("Доступ только для администраторов.<br/><br/><strong>Ваш Telegram ID:</strong> " + telegramId + "<br/>Добавьте его в <code>BOT_ADMIN_IDS</code> в .env на сервере и перезапустите бота.");
           }
         })
         .catch(function(err) {
-          clearTimeout(tid);
+          done();
           var isTimeout = err && err.name === "AbortError";
-          showError((isTimeout ? "Таймаут. Сервер не ответил за 12 сек. " : "Ошибка при проверке доступа. ") + "Убедитесь, что открываете из бота (кнопка «Админ-панель»).<br/><br/>Ваш ID: " + (telegramId || "—") + ".");
+          showError((isTimeout ? "Таймаут. " : "Ошибка сети. ") + "Ваш ID: " + (telegramId || "—") + ". Откройте из бота (кнопка «Админ-панель»).");
         });
     }
     function loadTariffs() {
