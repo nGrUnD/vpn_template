@@ -231,7 +231,10 @@ def _admin_html() -> str:
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
-  <div class="header">Админ-панель</div>
+  <div class="header" style="display:flex;align-items:center;gap:12px;">
+    <a href="/" style="color:var(--hint,#94a3b8);text-decoration:none;font-size:14px;">← В приложение</a>
+    <span>Админ-панель</span>
+  </div>
   <div id="status" class="card" style="margin-bottom:16px;min-height:60px;"><span style="color:#94a3b8;">Загрузка…</span></div>
   <div id="forbidden" class="forbidden" style="display:none;"></div>
   <div id="content" style="display:none;">
@@ -434,6 +437,9 @@ async def handle_index(request: web.Request) -> web.Response:
 </head>
 <body>
   <div class="header">raccaster_vpn</div>
+  <div id="admin-link-wrap" style="display:none; margin-bottom: 16px;">
+    <a href="/admin" id="admin-link" style="display:inline-block; padding: 10px 16px; background: var(--secondary, #334155); color: var(--hint, #94a3b8); border-radius: 12px; text-decoration: none; font-size: 14px;">⚙ Админ-панель</a>
+  </div>
 
   <div class="section-title">Тарифы</div>
   <div class="tariffs" id="tariffs"></div>
@@ -523,6 +529,14 @@ async def handle_index(request: web.Request) -> web.Response:
         .then(function(data) { if (data.ok && data.tariffs) renderTariffs(data.tariffs); });
     }
 
+    function checkAdminLink() {
+      if (!telegramId) return;
+      fetch("/api/admin/me", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telegram_id: telegramId }) })
+        .then(function(r) { return r.ok ? r.json() : null; })
+        .then(function(d) { if (d && d.ok && d.is_admin) { var w = document.getElementById("admin-link-wrap"); if (w) w.style.display = "block"; } })
+        .catch(function() {});
+    }
+
     function loadConfigs() {
       if (!telegramId) { renderConfigs([]); return; }
       fetch("/api/my-configs", {
@@ -569,6 +583,7 @@ async def handle_index(request: web.Request) -> web.Response:
 
     loadTariffs();
     loadConfigs();
+    checkAdminLink();
   </script>
 </body>
 </html>

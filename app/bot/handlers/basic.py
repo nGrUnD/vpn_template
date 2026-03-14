@@ -20,11 +20,7 @@ router = Router()
 
 
 @router.message(CommandStart())
-async def cmd_start(
-    message: Message,
-    webapp_url: str | None = None,
-    admin_ids: list[int] | None = None,
-) -> None:
+async def cmd_start(message: Message, webapp_url: str | None = None) -> None:
     """
     Register user in DB (if needed) and greet.
     """
@@ -52,14 +48,11 @@ async def cmd_start(
     await message.answer("\n".join(text_lines), parse_mode="Markdown", reply_markup=keyboard)
 
     if webapp_url:
-        buttons = [
-            [InlineKeyboardButton(text="Открыть raccaster_vpn WebApp", web_app=WebAppInfo(url=webapp_url))]
-        ]
-        if admin_ids and message.from_user and message.from_user.id in admin_ids:
-            buttons.append(
-                [InlineKeyboardButton(text="Админ-панель", web_app=WebAppInfo(url=webapp_url.rstrip("/") + "/admin"))]
-            )
-        inline_kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+        inline_kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="Открыть приложение", web_app=WebAppInfo(url=webapp_url))]
+            ]
+        )
         await message.answer("Открой мини-приложение для управления VPN:", reply_markup=inline_kb)
 
 
