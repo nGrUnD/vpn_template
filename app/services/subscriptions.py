@@ -9,13 +9,23 @@ from app.db import get_pool
 from app.threexui_client import ThreeXUIClient, ThreeXUIClientInfo
 
 
-async def get_active_subscriptions_by_telegram_id(telegram_id: int) -> list[asyncpg.Record]:
-    """Список активных подписок пользователя по telegram_id."""
+INBOUND_ID_FOR_SYNC = 1
+
+
+async def get_active_subscriptions_by_telegram_id(
+    telegram_id: int,
+    threexui: ThreeXUIClient | None = None,
+) -> list[asyncpg.Record]:
+    """
+    Список активных подписок пользователя.
+    Если передан threexui, перед возвратом синхронизирует с панелью:
+    подписки, у которых клиент удалён в 3x-ui, помечаются is_active=FALSE.
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT s.id, s.server_label, s.config, s.is_active, s.expires_at, s.created_at
+            SELECT s.id, s.server_label, s.threexui_client_id, s.config, s.is_active, s.expires_at, s.created_at
             FROM subscriptions s
             JOIN users u ON u.id = s.user_id
             WHERE u.telegram_id = $1 AND s.is_active = TRUE AND (s.expires_at IS NULL OR s.expires_at > NOW())
@@ -23,7 +33,17 @@ async def get_active_subscriptions_by_telegram_id(telegram_id: int) -> list[asyn
             """,
             telegram_id,
         )
-    return list(rows)
+        rows = list(rows)
+        if threexui and rows:
+            still_active = []
+            for r in rows:
+                client_id = r.get("threexui_client_id")
+                if client_id and not await threexui.client_exists(INBOUND_ID_FOR_SYNC, client_id):
+                    await conn.execute("UPDATE subscriptions SET is_active = FALSE WHERE id = $1", r["id"])
+                else:
+                    still_active.append(r)
+            rows = still_active
+    return rows
 
 
 async def create_test_subscription(

@@ -60,7 +60,8 @@ async def handle_my_configs(request: web.Request) -> web.Response:
     if not telegram_id:
         return web.json_response({"ok": False, "error": "telegram_id is required"}, status=400)
     telegram_id = int(telegram_id)
-    rows = await get_active_subscriptions_by_telegram_id(telegram_id)
+    threexui = request.app.get("threexui")
+    rows = await get_active_subscriptions_by_telegram_id(telegram_id, threexui=threexui)
     configs = [
         {
             "id": r["id"],
@@ -257,27 +258,33 @@ def _admin_html() -> str:
     function toast(msg) { var el = document.getElementById("toast"); el.textContent = msg; el.classList.add("show"); setTimeout(function() { el.classList.remove("show"); }, 2500); }
     function payload(extra) { var p = { telegram_id: telegramId }; for (var k in extra) p[k] = extra[k]; return p; }
     function checkAdmin() {
-      if (!telegramId) { document.getElementById("forbidden").style.display = "block"; return; }
+      var forbiddenEl = document.getElementById("forbidden");
+      var contentEl = document.getElementById("content");
+      if (!telegramId) { forbiddenEl.style.display = "block"; return; }
       fetch("/api/admin/me", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telegram_id: telegramId }) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
-          if (d.ok && d.is_admin) { document.getElementById("content").style.display = "block"; loadTariffs(); }
-          else { document.getElementById("forbidden").style.display = "block"; }
-        });
+          if (d && d.ok && d.is_admin) { contentEl.style.display = "block"; loadTariffs(); }
+          else { forbiddenEl.style.display = "block"; }
+        })
+        .catch(function() { forbiddenEl.style.display = "block"; });
     }
     function loadTariffs() {
       fetch("/api/admin/tariffs/list", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telegram_id: telegramId }) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
-          if (!d.ok) return;
           var tbody = document.getElementById("tariffs-tbody");
-          tbody.innerHTML = (d.tariffs || []).map(function(t) {
+          if (!d || !d.ok) { tbody.innerHTML = "<tr><td colspan=\"8\">Ошибка загрузки</td></tr>"; return; }
+          var list = d.tariffs || [];
+          if (list.length === 0) { tbody.innerHTML = "<tr><td colspan=\"8\">Нет тарифов</td></tr>"; return; }
+          tbody.innerHTML = list.map(function(t) {
             return "<tr><td>" + t.id + "</td><td>" + (t.name || "") + "</td><td>" + t.months + "</td><td>" + t.price_rub + "</td><td>" + t.traffic_gb + "</td><td>" + (t.badge || "") + "</td><td>" + (t.is_active ? "да" : "нет") + "</td><td><button class=\"danger\" data-id=\"" + t.id + "\">Удалить</button></td></tr>";
           }).join("");
           tbody.querySelectorAll("button").forEach(function(btn) {
             btn.onclick = function() { deleteTariff(parseInt(btn.dataset.id, 10)); };
           });
-        });
+        })
+        .catch(function() { var tbody = document.getElementById("tariffs-tbody"); tbody.innerHTML = "<tr><td colspan=\"8\">Ошибка сети</td></tr>"; });
     }
     function createTariff() {
       var name = document.getElementById("new-name").value.trim();
@@ -299,7 +306,8 @@ def _admin_html() -> str:
     }
     if (tg) tg.expand();
     document.getElementById("btn-create").onclick = createTariff;
-    checkAdmin();
+    if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", checkAdmin); }
+    else { checkAdmin(); }
   </script>
 </body>
 </html>

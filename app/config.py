@@ -23,6 +23,8 @@ class ThreeXUIConfig:
     base_url: str
     username: str
     password: str
+    vless_server: str | None = None  # хост для сборки VLESS-ссылки (опционально)
+    vless_port: int | None = None
 
 
 @dataclass
@@ -55,6 +57,9 @@ def load_config() -> AppConfig:
     threexui_base_url = os.getenv("THREEXUI_BASE_URL", "").rstrip("/")
     threexui_username = os.getenv("THREEXUI_USERNAME", "")
     threexui_password = os.getenv("THREEXUI_PASSWORD", "")
+    vless_server = (os.getenv("VLESS_SERVER") or "").strip() or None
+    vless_port_str = os.getenv("VLESS_PORT", "").strip()
+    vless_port = int(vless_port_str) if vless_port_str.isdigit() else None
 
     raw_webapp_url = (os.getenv("WEBAPP_URL") or "").strip() or None
     if raw_webapp_url and not raw_webapp_url.startswith(("http://", "https://")):
@@ -69,6 +74,8 @@ def load_config() -> AppConfig:
             base_url=threexui_base_url,
             username=threexui_username,
             password=threexui_password,
+            vless_server=vless_server,
+            vless_port=vless_port,
         ),
         webapp_url=webapp_url,
         webapp_port=webapp_port,
