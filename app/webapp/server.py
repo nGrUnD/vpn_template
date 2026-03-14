@@ -213,7 +213,7 @@ def _admin_html() -> str:
     * { box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f172a; color: #e5e7eb; margin: 0; padding: 16px; }
     .header { font-size: 20px; font-weight: 700; margin-bottom: 16px; }
-    .forbidden { color: #f87171; padding: 24px; }
+    .forbidden { color: #f87171; padding: 24px; background: #1e293b; border-radius: 12px; margin-bottom: 16px; line-height: 1.5; }
     table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
     th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #334155; }
     th { color: #94a3b8; font-weight: 600; font-size: 12px; text-transform: uppercase; }
@@ -232,7 +232,8 @@ def _admin_html() -> str:
 </head>
 <body>
   <div class="header">Админ-панель</div>
-  <div id="forbidden" class="forbidden" style="display:none;">Доступ только для администраторов.</div>
+  <div id="status" class="card" style="margin-bottom:16px;min-height:60px;"><span style="color:#94a3b8;">Загрузка…</span></div>
+  <div id="forbidden" class="forbidden" style="display:none;"></div>
   <div id="content" style="display:none;">
     <div class="card">
       <div style="margin-bottom:12px;font-weight:600;">Добавить тариф</div>
@@ -257,17 +258,36 @@ def _admin_html() -> str:
     var telegramId = tg && tg.initDataUnsafe && tg.initDataUnsafe.user ? tg.initDataUnsafe.user.id : null;
     function toast(msg) { var el = document.getElementById("toast"); el.textContent = msg; el.classList.add("show"); setTimeout(function() { el.classList.remove("show"); }, 2500); }
     function payload(extra) { var p = { telegram_id: telegramId }; for (var k in extra) p[k] = extra[k]; return p; }
+    function setStatus(html) { var el = document.getElementById("status"); if (el) el.innerHTML = html; }
     function checkAdmin() {
+      var statusEl = document.getElementById("status");
       var forbiddenEl = document.getElementById("forbidden");
       var contentEl = document.getElementById("content");
-      if (!telegramId) { forbiddenEl.style.display = "block"; return; }
+      if (!telegramId) {
+        setStatus("");
+        forbiddenEl.innerHTML = "Не удалось получить ваш Telegram ID.<br/>Откройте админку из бота: нажмите /start, затем кнопку «Админ-панель».";
+        forbiddenEl.style.display = "block";
+        return;
+      }
+      setStatus("<span style=\"color:#94a3b8;\">Проверка доступа…</span>");
       fetch("/api/admin/me", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telegram_id: telegramId }) })
         .then(function(r) { return r.json(); })
         .then(function(d) {
-          if (d && d.ok && d.is_admin) { contentEl.style.display = "block"; loadTariffs(); }
-          else { forbiddenEl.style.display = "block"; }
+          if (d && d.ok && d.is_admin) {
+            setStatus("");
+            contentEl.style.display = "block";
+            loadTariffs();
+          } else {
+            setStatus("");
+            forbiddenEl.innerHTML = "Доступ только для администраторов.<br/><br/><strong>Ваш Telegram ID:</strong> " + telegramId + "<br/>Добавьте его в <code>BOT_ADMIN_IDS</code> в файле .env на сервере и перезапустите бота.";
+            forbiddenEl.style.display = "block";
+          }
         })
-        .catch(function() { forbiddenEl.style.display = "block"; });
+        .catch(function(err) {
+          setStatus("");
+          forbiddenEl.innerHTML = "Ошибка при проверке доступа. Убедитесь, что открываете из Telegram (кнопка «Админ-панель»).<br/><br/>Ваш ID: " + (telegramId || "—") + ".";
+          forbiddenEl.style.display = "block";
+        });
     }
     function loadTariffs() {
       fetch("/api/admin/tariffs/list", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telegram_id: telegramId }) })
