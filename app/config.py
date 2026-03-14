@@ -56,7 +56,10 @@ def load_config() -> AppConfig:
     threexui_username = os.getenv("THREEXUI_USERNAME", "")
     threexui_password = os.getenv("THREEXUI_PASSWORD", "")
 
-    webapp_url = os.getenv("WEBAPP_URL") or None
+    raw_webapp_url = (os.getenv("WEBAPP_URL") or "").strip() or None
+    if raw_webapp_url and not raw_webapp_url.startswith(("http://", "https://")):
+        raw_webapp_url = "https://" + raw_webapp_url
+    webapp_url = raw_webapp_url
     webapp_port = int(os.getenv("WEBAPP_PORT", "8080"))
 
     return AppConfig(
