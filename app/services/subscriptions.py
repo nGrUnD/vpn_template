@@ -25,7 +25,19 @@ async def get_active_subscriptions_by_telegram_id(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT s.id, s.server_label, s.threexui_client_id, s.config, s.is_active, s.expires_at, s.created_at
+            SELECT
+                s.id,
+                s.server_label,
+                s.threexui_client_id,
+                s.config,
+                s.device_os,
+                s.tariff_id,
+                COALESCE(s.tariff_price_stars, s.tariff_price_rub) AS tariff_price_stars,
+                s.tariff_months,
+                s.tariff_traffic_gb,
+                s.is_active,
+                s.expires_at,
+                s.created_at
             FROM subscriptions s
             JOIN users u ON u.id = s.user_id
             WHERE u.telegram_id = $1 AND s.is_active = TRUE AND (s.expires_at IS NULL OR s.expires_at > NOW())
@@ -89,4 +101,126 @@ async def create_test_subscription(
         )
 
     return row
+
+
+async def create_subscription_from_tariff(
+    *,
+    db_user_id: int,
+    telegram_id: int,
+    threexui: ThreeXUIClient,
+    months: int,
+    traffic_gb: int,
+    tariff_name: str,
+    tariff_id: int | None = None,
+    tariff_price_stars: int | None = None,
+    device_os: str | None = None,
+) -> asyncpg.Record:
+    """Создать обычную VPN-подписку по тарифу."""
+    expire_days = max(int(months), 1) * 30
+    total_gb = int(traffic_gb or 0)
+    os_suffix = f"_{device_os.lower()}" if device_os else ""
+    client_info: ThreeXUIClientInfo = await threexui.create_vless_client(
+        telegram_id=telegram_id,
+        expire_days=expire_days,
+        total_gb=total_gb,
+        remark=f"vpn_{telegram_id}{os_suffix}",
+    )
+
+    expires_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=expire_days)
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row: Optional[asyncpg.Record] = await conn.fetchrow(
+            """
+            INSERT INTO subscriptions (
+                user_id,
+                server_label,
+                threexui_client_id,
+                config,
+                is_active,
+                expires_at,
+                device_os,
+                tariff_id,
+                tariff_price_rub,
+                tariff_price_stars,
+                tariff_months,
+                tariff_traffic_gb
+            ) VALUES ($1, $2, $3, $4, TRUE, $5, $6, $7, $8, $8, $9, $10)
+            RETURNING *;
+            """,
+            db_user_id,
+            tariff_name,
+            client_info.client_id,
+            client_info.config_text,
+            expires_at,
+            device_os,
+            tariff_id,
+            tariff_price_stars,
+            months,
+            traffic_gb,
+        )
+
+    return row
+
+
+async def get_subscription_for_user(subscription_id: int, telegram_id: int) -> Optional[asyncpg.Record]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            """
+            SELECT
+                s.*,
+                u.telegram_id
+            FROM subscriptions s
+            JOIN users u ON u.id = s.user_id
+            WHERE s.id = $1 AND u.telegram_id = $2
+            """,
+            subscription_id,
+            telegram_id,
+        )
+
+
+async def extend_subscription_for_user(
+    *,
+    subscription_id: int,
+    telegram_id: int,
+    threexui: ThreeXUIClient,
+) -> Optional[asyncpg.Record]:
+    """Продлить существующую подписку по сохраненным параметрам тарифа."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await get_subscription_for_user(subscription_id, telegram_id)
+        if not row:
+            return None
+
+        months = int(row["tariff_months"] or 0)
+        traffic_gb = int(row["tariff_traffic_gb"] or 0)
+        client_id = row["threexui_client_id"]
+        if months <= 0 or not client_id:
+            return None
+
+        expire_days = max(months, 1) * 30
+        updated = await threexui.extend_client(
+            INBOUND_ID_FOR_SYNC,
+            client_id,
+            add_days=expire_days,
+            add_total_gb=traffic_gb,
+        )
+        if not updated:
+            return None
+
+        current_expiry = row["expires_at"]
+        now = dt.datetime.now(dt.timezone.utc)
+        base = current_expiry if current_expiry and current_expiry > now else now
+        new_expiry = base + dt.timedelta(days=expire_days)
+        return await conn.fetchrow(
+            """
+            UPDATE subscriptions
+            SET expires_at = $2, is_active = TRUE
+            WHERE id = $1
+            RETURNING *
+            """,
+            subscription_id,
+            new_expiry,
+        )
 

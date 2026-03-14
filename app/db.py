@@ -33,6 +33,25 @@ async def init_db(db_config: DatabaseConfig) -> None:
             );
             """
         )
+        await conn.execute(
+            """
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS vpn_balance INT NOT NULL DEFAULT 0;
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS vpn_balance_stars INT NOT NULL DEFAULT 0;
+            """
+        )
+        await conn.execute(
+            """
+            UPDATE users
+            SET vpn_balance_stars = vpn_balance
+            WHERE vpn_balance_stars = 0 AND vpn_balance <> 0;
+            """
+        )
 
         await conn.execute(
             """
@@ -46,6 +65,49 @@ async def init_db(db_config: DatabaseConfig) -> None:
                 expires_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ DEFAULT NOW()
             );
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE subscriptions
+            ADD COLUMN IF NOT EXISTS device_os TEXT;
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE subscriptions
+            ADD COLUMN IF NOT EXISTS tariff_id INTEGER;
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE subscriptions
+            ADD COLUMN IF NOT EXISTS tariff_price_rub INT;
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE subscriptions
+            ADD COLUMN IF NOT EXISTS tariff_price_stars INT;
+            """
+        )
+        await conn.execute(
+            """
+            UPDATE subscriptions
+            SET tariff_price_stars = tariff_price_rub
+            WHERE tariff_price_stars IS NULL AND tariff_price_rub IS NOT NULL;
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE subscriptions
+            ADD COLUMN IF NOT EXISTS tariff_months INT;
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE subscriptions
+            ADD COLUMN IF NOT EXISTS tariff_traffic_gb INT;
             """
         )
 
@@ -64,19 +126,62 @@ async def init_db(db_config: DatabaseConfig) -> None:
             );
             """
         )
+        await conn.execute(
+            """
+            ALTER TABLE tariffs
+            ADD COLUMN IF NOT EXISTS price_stars INT;
+            """
+        )
+        await conn.execute(
+            """
+            UPDATE tariffs
+            SET price_stars = price_rub
+            WHERE price_stars IS NULL;
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS wallet_transactions (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                amount INT NOT NULL,
+                currency TEXT NOT NULL DEFAULT 'XTR',
+                description TEXT,
+                payload TEXT UNIQUE,
+                telegram_payment_charge_id TEXT,
+                provider_payment_charge_id TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                paid_at TIMESTAMPTZ
+            );
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE wallet_transactions
+            ADD COLUMN IF NOT EXISTS provider_amount INT;
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE wallet_transactions
+            ADD COLUMN IF NOT EXISTS provider_currency TEXT;
+            """
+        )
 
         # Дефолтные тарифы при первом запуске
         n = await conn.fetchval("SELECT COUNT(*) FROM tariffs")
         if n == 0:
             await conn.executemany(
                 """
-                INSERT INTO tariffs (name, months, price_rub, traffic_gb, badge, sort_order)
-                VALUES ($1, $2, $3, $4, $5, $6);
+                INSERT INTO tariffs (name, months, price_rub, price_stars, traffic_gb, badge, sort_order)
+                VALUES ($1, $2, $3, $4, $5, $6, $7);
                 """,
                 [
-                    ("1 месяц", 1, 300, 30, None, 0),
-                    ("3 месяца", 3, 750, 100, "−17%", 1),
-                    ("12 месяцев", 12, 2400, 500, "−33%", 2),
+                    ("1 месяц", 1, 300, 300, 30, None, 0),
+                    ("3 месяца", 3, 750, 750, 100, "−17%", 1),
+                    ("12 месяцев", 12, 2400, 2400, 500, "−33%", 2),
                 ],
             )
 

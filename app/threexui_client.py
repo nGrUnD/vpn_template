@@ -150,6 +150,12 @@ class ThreeXUIClient:
                 continue
         return None
 
+    def _extract_clients(self, inbound_obj: dict[str, Any]) -> list[dict[str, Any]]:
+        settings_raw = inbound_obj.get("settings") or "{}"
+        settings = json.loads(settings_raw) if isinstance(settings_raw, str) else (settings_raw or {})
+        clients = settings.get("clients") or []
+        return clients if isinstance(clients, list) else []
+
     def _get_nested(self, d: dict, *keys: str) -> Any:
         """Взять значение по первому существующему ключу (camelCase или snake_case)."""
         for k in keys:
@@ -284,10 +290,64 @@ class ThreeXUIClient:
             if not data.get("success"):
                 return False
             obj = data.get("obj") or {}
-            settings_str = obj.get("settings") or "{}"
-            settings = json.loads(settings_str) if isinstance(settings_str, str) else settings_str
-            clients = settings.get("clients") or []
+            clients = self._extract_clients(obj)
             return any(c.get("id") == client_uuid for c in clients)
+        except Exception:
+            return True
+
+    async def extend_client(self, inbound_id: int, client_uuid: str, add_days: int, add_total_gb: int) -> bool:
+        """
+        Продлить существующего клиента: увеличить expiryTime и totalGB.
+        """
+        await self._ensure_login()
+        inbound = await self._get_inbound(inbound_id)
+        if not inbound:
+            return False
+
+        clients = self._extract_clients(inbound)
+        target = next((client for client in clients if client.get("id") == client_uuid), None)
+        if not target:
+            return False
+
+        now_ms = int(time.time() * 1000)
+        current_expiry = int(target.get("expiryTime") or 0)
+        base_expiry = current_expiry if current_expiry and current_expiry > now_ms else now_ms
+        target["expiryTime"] = base_expiry + max(int(add_days), 1) * 24 * 60 * 60 * 1000
+
+        current_total = int(target.get("totalGB") or 0)
+        add_bytes = 0 if int(add_total_gb or 0) <= 0 else int(add_total_gb) * (1024**3)
+        if current_total == 0 or add_bytes == 0:
+            target["totalGB"] = 0
+        else:
+            target["totalGB"] = current_total + add_bytes
+        target["enable"] = True
+
+        payload_obj = {"id": inbound_id, "settings": {"clients": [target]}}
+        response = await self._client.post(
+            f"/panel/api/inbounds/updateClient/{client_uuid}",
+            json=payload_obj,
+            cookies=self._auth_cookies,
+        )
+        response.raise_for_status()
+        try:
+            data = response.json()
+            if data.get("success"):
+                return True
+        except Exception:
+            pass
+
+        payload_str = {
+            "id": inbound_id,
+            "settings": json.dumps({"clients": [target]}, ensure_ascii=False, separators=(",", ":")),
+        }
+        response = await self._client.post(
+            f"/panel/api/inbounds/updateClient/{client_uuid}",
+            json=payload_str,
+            cookies=self._auth_cookies,
+        )
+        response.raise_for_status()
+        try:
+            return bool(response.json().get("success"))
         except Exception:
             return True
 

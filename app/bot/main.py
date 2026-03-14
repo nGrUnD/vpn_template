@@ -25,8 +25,8 @@ async def run_bot(bot: Bot, dp: Dispatcher, threexui_client: ThreeXUIClient) -> 
     await dp.start_polling(bot, threexui=threexui_client)
 
 
-async def run_web(threexui_client: ThreeXUIClient, port: int, admin_ids: list[int]) -> None:
-    app = create_web_app(threexui_client, admin_ids)
+async def run_web(bot: Bot, threexui_client: ThreeXUIClient, port: int, admin_ids: list[int]) -> None:
+    app = create_web_app(threexui_client, admin_ids, bot)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host="0.0.0.0", port=port)
@@ -65,7 +65,7 @@ async def main() -> None:
     try:
         await asyncio.gather(
             run_bot(bot, dp, threexui_client),
-            run_web(threexui_client, config.webapp_port, config.bot.admin_ids),
+            run_web(bot, threexui_client, config.webapp_port, config.bot.admin_ids),
         )
     finally:
         await threexui_client.close()

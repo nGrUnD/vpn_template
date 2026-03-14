@@ -14,7 +14,7 @@ async def get_tariffs(active_only: bool = True) -> list[dict[str, Any]]:
         where = "WHERE is_active = TRUE" if active_only else ""
         rows = await conn.fetch(
             f"""
-            SELECT id, name, months, price_rub, traffic_gb, badge, sort_order, is_active
+            SELECT id, name, months, COALESCE(price_stars, price_rub) AS price_stars, traffic_gb, badge, sort_order, is_active
             FROM tariffs
             {where}
             ORDER BY sort_order ASC, id ASC;
@@ -25,7 +25,7 @@ async def get_tariffs(active_only: bool = True) -> list[dict[str, Any]]:
             "id": r["id"],
             "name": r["name"],
             "months": r["months"],
-            "price_rub": r["price_rub"],
+            "price_stars": r["price_stars"],
             "traffic_gb": r["traffic_gb"],
             "badge": r["badge"],
             "sort_order": r["sort_order"],
@@ -45,7 +45,7 @@ async def get_tariff_by_id(tariff_id: int) -> Optional[asyncpg.Record]:
 async def create_tariff(
     name: str,
     months: int,
-    price_rub: int,
+    price_stars: int,
     traffic_gb: int = 0,
     badge: Optional[str] = None,
     sort_order: int = 0,
@@ -55,13 +55,13 @@ async def create_tariff(
     async with pool.acquire() as conn:
         return await conn.fetchrow(
             """
-            INSERT INTO tariffs (name, months, price_rub, traffic_gb, badge, sort_order)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO tariffs (name, months, price_rub, price_stars, traffic_gb, badge, sort_order)
+            VALUES ($1, $2, $3, $3, $4, $5, $6)
             RETURNING *;
             """,
             name,
             months,
-            price_rub,
+            price_stars,
             traffic_gb,
             badge,
             sort_order,
@@ -73,7 +73,7 @@ async def update_tariff(
     *,
     name: Optional[str] = None,
     months: Optional[int] = None,
-    price_rub: Optional[int] = None,
+    price_stars: Optional[int] = None,
     traffic_gb: Optional[int] = None,
     badge: Optional[str] = None,
     sort_order: Optional[int] = None,
@@ -92,9 +92,9 @@ async def update_tariff(
         updates.append(f"months = ${i}")
         values.append(months)
         i += 1
-    if price_rub is not None:
-        updates.append(f"price_rub = ${i}")
-        values.append(price_rub)
+    if price_stars is not None:
+        updates.append(f"price_stars = ${i}")
+        values.append(price_stars)
         i += 1
     if traffic_gb is not None:
         updates.append(f"traffic_gb = ${i}")

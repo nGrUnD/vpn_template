@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import CommandStart, Command
 from aiogram.types import (
     Message,
@@ -9,10 +9,12 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     WebAppInfo,
+    PreCheckoutQuery,
 )
 
 from app.services.users import get_or_create_user
 from app.services.subscriptions import create_test_subscription
+from app.services.wallet import mark_topup_paid
 from app.threexui_client import ThreeXUIClient
 
 
@@ -119,5 +121,26 @@ async def cmd_buy(message: Message) -> None:
     ]
 
     await message.answer("\n".join(text_lines))
+
+
+@router.pre_checkout_query()
+async def handle_pre_checkout_query(query: PreCheckoutQuery) -> None:
+    await query.answer(ok=True)
+
+
+@router.message(F.successful_payment)
+async def handle_successful_payment(message: Message) -> None:
+    payment = message.successful_payment
+    if not payment:
+        return
+    payload = payment.invoice_payload or ""
+    applied = await mark_topup_paid(
+        payload=payload,
+        telegram_payment_charge_id=getattr(payment, "telegram_payment_charge_id", None),
+        total_amount=int(payment.total_amount or 0),
+        currency=payment.currency or "XTR",
+    )
+    if applied:
+        await message.answer("Баланс VPN пополнен.")
 
 
