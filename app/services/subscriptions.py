@@ -57,10 +57,11 @@ async def create_test_subscription(
     Uses ThreeXUIClient to provision a VLESS client and stores
     resulting config in the database.
     """
+    # total_gb=0 в 3x-ui означает безлимитный трафик (как при создании через панель)
     client_info: ThreeXUIClientInfo = await threexui.create_vless_client(
         telegram_id=telegram_id,
         expire_days=1,
-        total_gb=3,
+        total_gb=0,
         remark=f"test_{telegram_id}",
     )
 

@@ -84,6 +84,9 @@ class ThreeXUIClient:
         client_uuid = str(uuid.uuid4())
         client_email = remark or f"tg_{telegram_id}"
 
+        # В API 3x-ui totalGB передаётся в БАЙТАХ. 0 = безлимит, иначе total_gb * 1024³
+        total_bytes = 0 if total_gb <= 0 else int(total_gb) * (1024**3)
+
         client_obj = {
             "id": client_uuid,
             "security": "auto",
@@ -91,7 +94,7 @@ class ThreeXUIClient:
             "flow": "",
             "email": client_email,
             "limitIp": 0,
-            "totalGB": int(total_gb),
+            "totalGB": total_bytes,
             "expiryTime": expiry_ts_ms,
             "enable": True,
             "tgId": int(telegram_id),
