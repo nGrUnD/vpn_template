@@ -25,12 +25,12 @@ async def run_bot(bot: Bot, dp: Dispatcher, threexui_client: ThreeXUIClient) -> 
     await dp.start_polling(bot, threexui=threexui_client)
 
 
-async def run_web(threexui_client: ThreeXUIClient) -> None:
+async def run_web(threexui_client: ThreeXUIClient, port: int) -> None:
     app = create_web_app(threexui_client)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, host="0.0.0.0", port=8080)
-    logger.info("Starting WebApp server on http://0.0.0.0:8080")
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+    logger.info("Starting WebApp server on http://0.0.0.0:%s", port)
     await site.start()
 
     # Keep running until cancelled
@@ -64,7 +64,7 @@ async def main() -> None:
     try:
         await asyncio.gather(
             run_bot(bot, dp, threexui_client),
-            run_web(threexui_client),
+            run_web(threexui_client, config.webapp_port),
         )
     finally:
         await threexui_client.close()

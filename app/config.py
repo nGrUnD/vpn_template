@@ -31,6 +31,7 @@ class AppConfig:
     db: DatabaseConfig
     threexui: ThreeXUIConfig
     webapp_url: str | None = None
+    webapp_port: int = 8080
 
 
 def _parse_int_list(value: str | None) -> list[int]:
@@ -56,6 +57,7 @@ def load_config() -> AppConfig:
     threexui_password = os.getenv("THREEXUI_PASSWORD", "")
 
     webapp_url = os.getenv("WEBAPP_URL") or None
+    webapp_port = int(os.getenv("WEBAPP_PORT", "8080"))
 
     return AppConfig(
         bot=BotConfig(token=bot_token, admin_ids=admin_ids),
@@ -66,5 +68,6 @@ def load_config() -> AppConfig:
             password=threexui_password,
         ),
         webapp_url=webapp_url,
+        webapp_port=webapp_port,
     )
 
