@@ -255,10 +255,15 @@ def _admin_html() -> str:
   <div class="toast" id="toast"></div>
   <script>
     var tg = window.Telegram && window.Telegram.WebApp;
-    var telegramId = tg && tg.initDataUnsafe && tg.initDataUnsafe.user ? tg.initDataUnsafe.user.id : null;
+    function getTelegramId() {
+      var t = window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initDataUnsafe && window.Telegram.WebApp.initDataUnsafe.user;
+      var id = t ? t.id : null;
+      return id != null ? Number(id) : null;
+    }
     function toast(msg) { var el = document.getElementById("toast"); el.textContent = msg; el.classList.add("show"); setTimeout(function() { el.classList.remove("show"); }, 2500); }
-    function payload(extra) { var p = { telegram_id: telegramId }; for (var k in extra) p[k] = extra[k]; return p; }
+    function payload(extra) { var p = { telegram_id: getTelegramId() }; for (var k in extra) p[k] = extra[k]; return p; }
     function loadTariffs() {
+      var telegramId = getTelegramId();
       fetch("/api/admin/tariffs/list", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telegram_id: telegramId }) })
         .then(function(r) { if (!r.ok) return { ok: false }; return r.json().catch(function() { return { ok: false }; }); })
         .then(function(d) {
@@ -284,18 +289,20 @@ def _admin_html() -> str:
       var sort_order = parseInt(document.getElementById("new-sort_order").value, 10) || 0;
       if (!name || isNaN(months) || isNaN(price_rub)) { toast("Заполните название, месяцы и цену"); return; }
       fetch("/api/admin/tariffs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload({ name: name, months: months, price_rub: price_rub, traffic_gb: traffic_gb, badge: badge, sort_order: sort_order })) })
-        .then(function(r) { return r.json(); })
-        .then(function(d) { if (d.ok) { toast("Тариф добавлен"); document.getElementById("new-name").value = ""; loadTariffs(); } else toast(d.error || "Ошибка"); });
+        .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }).catch(function() { return { ok: false, data: {} }; }); })
+        .then(function(o) { if (o.ok && o.data && o.data.ok) { toast("Тариф добавлен"); document.getElementById("new-name").value = ""; loadTariffs(); } else { toast((o.data && o.data.error) || "Ошибка"); } })
+        .catch(function() { toast("Ошибка сети"); });
     }
     function deleteTariff(id) {
       if (!confirm("Удалить тариф?")) return;
-      fetch("/api/admin/tariffs/" + id, { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telegram_id: telegramId }) })
-        .then(function(r) { return r.json(); })
-        .then(function(d) { if (d.ok && d.deleted) { toast("Удалён"); loadTariffs(); } else toast(d.error || "Ошибка"); });
+      fetch("/api/admin/tariffs/" + id, { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telegram_id: getTelegramId() }) })
+        .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }).catch(function() { return { ok: false, data: {} }; }); })
+        .then(function(o) { if (o.ok && o.data && o.data.ok && o.data.deleted) { toast("Удалён"); loadTariffs(); } else { toast((o.data && o.data.error) || "Ошибка"); } })
+        .catch(function() { toast("Ошибка сети"); });
     }
     if (tg) tg.expand();
     document.getElementById("btn-create").onclick = createTariff;
-    loadTariffs();
+    setTimeout(loadTariffs, 200);
   </script>
 </body>
 </html>
