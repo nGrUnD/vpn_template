@@ -213,7 +213,6 @@ def _admin_html() -> str:
     * { box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f172a; color: #e5e7eb; margin: 0; padding: 16px; }
     .header { font-size: 20px; font-weight: 700; margin-bottom: 16px; }
-    .forbidden { color: #f87171; padding: 24px; background: #1e293b; border-radius: 12px; margin-bottom: 16px; line-height: 1.5; }
     table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
     th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #334155; }
     th { color: #94a3b8; font-weight: 600; font-size: 12px; text-transform: uppercase; }
@@ -235,9 +234,7 @@ def _admin_html() -> str:
     <a href="/" style="color:var(--hint,#94a3b8);text-decoration:none;font-size:14px;">← В приложение</a>
     <span>Админ-панель</span>
   </div>
-  <div id="status" class="card" style="margin-bottom:16px;min-height:60px;"><span style="color:#94a3b8;">Загрузка…</span></div>
-  <div id="forbidden" class="forbidden" style="display:none;"></div>
-  <div id="content" style="display:none;">
+  <div id="content">
     <div class="card">
       <div style="margin-bottom:12px;font-weight:600;">Добавить тариф</div>
       <div class="form-grid">
@@ -261,59 +258,12 @@ def _admin_html() -> str:
     var telegramId = tg && tg.initDataUnsafe && tg.initDataUnsafe.user ? tg.initDataUnsafe.user.id : null;
     function toast(msg) { var el = document.getElementById("toast"); el.textContent = msg; el.classList.add("show"); setTimeout(function() { el.classList.remove("show"); }, 2500); }
     function payload(extra) { var p = { telegram_id: telegramId }; for (var k in extra) p[k] = extra[k]; return p; }
-    function setStatus(html) { var el = document.getElementById("status"); if (el) el.innerHTML = html; }
-    function showError(msg) {
-      setStatus("");
-      var forbiddenEl = document.getElementById("forbidden");
-      forbiddenEl.innerHTML = msg;
-      forbiddenEl.style.display = "block";
-    }
-    function checkAdmin() {
-      var forbiddenEl = document.getElementById("forbidden");
-      var contentEl = document.getElementById("content");
-      if (!telegramId) {
-        showError("Не удалось получить ваш Telegram ID.<br/>Откройте админку из бота: нажмите /start, затем кнопку «Админ-панель».");
-        return;
-      }
-      setStatus("<span style=\"color:#94a3b8;\">Проверка доступа…</span>");
-      var resolved = false;
-      var timeoutMs = 12000;
-      var fallbackTid = setTimeout(function() {
-        if (resolved) return;
-        resolved = true;
-        showError("Таймаут. Запрос не дошёл до сервера (12 сек). Откройте админку из Telegram (кнопка «Админ-панель»).<br/><br/>Ваш ID: " + telegramId + ".");
-      }, timeoutMs);
-      function done() { if (!resolved) { resolved = true; clearTimeout(fallbackTid); } }
-      fetch("/api/admin/me", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telegram_id: telegramId }) })
-        .then(function(r) {
-          done();
-          if (!r.ok) { throw new Error("HTTP " + r.status); }
-          return r.json().catch(function() { throw new Error("Неверный ответ"); });
-        })
-        .then(function(d) {
-          if (d && d.ok && d.is_admin) {
-            setStatus("");
-            contentEl.style.display = "block";
-            loadTariffs();
-          } else {
-            showError("Доступ только для администраторов.<br/><br/><strong>Ваш Telegram ID:</strong> " + telegramId + "<br/>Добавьте его в <code>BOT_ADMIN_IDS</code> в .env на сервере и перезапустите бота.");
-          }
-        })
-        .catch(function(err) {
-          done();
-          var isTimeout = err && err.name === "AbortError";
-          showError((isTimeout ? "Таймаут. " : "Ошибка сети. ") + "Ваш ID: " + (telegramId || "—") + ". Откройте из бота (кнопка «Админ-панель»).");
-        });
-    }
     function loadTariffs() {
-      var base = (typeof window !== "undefined" && window.location && window.location.origin) ? window.location.origin : "";
-      var controller = new AbortController();
-      var tid = setTimeout(function() { controller.abort(); }, 10000);
-      fetch(base + "/api/admin/tariffs/list", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telegram_id: telegramId }), signal: controller.signal })
-        .then(function(r) { clearTimeout(tid); return r.ok ? r.json() : Promise.reject(new Error(r.status)); })
+      fetch("/api/admin/tariffs/list", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telegram_id: telegramId }) })
+        .then(function(r) { if (!r.ok) return { ok: false }; return r.json().catch(function() { return { ok: false }; }); })
         .then(function(d) {
           var tbody = document.getElementById("tariffs-tbody");
-          if (!d || !d.ok) { tbody.innerHTML = "<tr><td colspan=\"8\">Ошибка загрузки</td></tr>"; return; }
+          if (!d || !d.ok) { tbody.innerHTML = "<tr><td colspan=\"8\">Нет доступа или ошибка загрузки</td></tr>"; return; }
           var list = d.tariffs || [];
           if (list.length === 0) { tbody.innerHTML = "<tr><td colspan=\"8\">Нет тарифов</td></tr>"; return; }
           tbody.innerHTML = list.map(function(t) {
@@ -323,7 +273,7 @@ def _admin_html() -> str:
             btn.onclick = function() { deleteTariff(parseInt(btn.dataset.id, 10)); };
           });
         })
-        .catch(function() { clearTimeout(tid); var tbody = document.getElementById("tariffs-tbody"); if (tbody) tbody.innerHTML = "<tr><td colspan=\"8\">Ошибка сети или таймаут</td></tr>"; });
+        .catch(function() { var tbody = document.getElementById("tariffs-tbody"); if (tbody) tbody.innerHTML = "<tr><td colspan=\"8\">Ошибка сети</td></tr>"; });
     }
     function createTariff() {
       var name = document.getElementById("new-name").value.trim();
@@ -345,8 +295,7 @@ def _admin_html() -> str:
     }
     if (tg) tg.expand();
     document.getElementById("btn-create").onclick = createTariff;
-    if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", checkAdmin); }
-    else { checkAdmin(); }
+    loadTariffs();
   </script>
 </body>
 </html>
