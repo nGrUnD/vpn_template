@@ -133,18 +133,26 @@ class ThreeXUIClient:
     async def _get_inbound(self, inbound_id: int) -> Optional[dict[str, Any]]:
         """Получить инбаунд по ID (для сборки VLESS из streamSettings и т.д.)."""
         await self._ensure_login()
-        try:
-            resp = await self._client.get(
-                f"/panel/api/inbounds/get/{inbound_id}",
-                cookies=self._auth_cookies,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            if not data.get("success"):
-                return None
-            return data.get("obj") or None
-        except Exception:
-            return None
+        for path in (f"/panel/api/inbounds/get/{inbound_id}", f"/panel/api/inbound/get/{inbound_id}"):
+            try:
+                resp = await self._client.get(path, cookies=self._auth_cookies)
+                resp.raise_for_status()
+                data = resp.json()
+                if not data.get("success"):
+                    continue
+                obj = data.get("obj") or data.get("data")
+                if obj:
+                    return obj
+            except Exception:
+                continue
+        return None
+
+    def _get_nested(self, d: dict, *keys: str) -> Any:
+        """Взять значение по первому существующему ключу (camelCase или snake_case)."""
+        for k in keys:
+            if k in d and d[k] is not None:
+                return d[k]
+        return None
 
     def _build_vless_from_inbound(
         self,
@@ -154,55 +162,77 @@ class ThreeXUIClient:
     ) -> Optional[str]:
         """
         Собрать VLESS-ссылку из объекта инбаунда (listen, port, streamSettings).
-        Структура зависит от версии 3x-ui; поддерживаем типичные поля.
+        Поддерживаем camelCase и snake_case в ответе API 3x-ui.
         """
         try:
-            listen = obj.get("listen") or ""
-            port = obj.get("port")
+            listen = (obj.get("listen") or obj.get("Listen") or "").strip()
+            port = self._get_nested(obj, "port", "Port")
             if port is None:
                 return None
             port = int(port) if isinstance(port, (int, float)) else None
-            if not listen or port is None:
+            if port is None:
                 return None
-            # Хост: listen может быть "0.0.0.0" — тогда подставляем хост из base_url панели
-            host = listen if listen not in ("0.0.0.0", "") else None
+            # Хост: listen "0.0.0.0" или пустой — берём из base_url панели
+            host = listen if listen and listen not in ("0.0.0.0", "::") else None
             if not host:
                 base = getattr(self._config, "base_url", "") or ""
                 parsed = urllib.parse.urlparse(base)
-                host = parsed.hostname or listen or "localhost"
-            stream_str = obj.get("streamSettings") or "{}"
-            stream = json.loads(stream_str) if isinstance(stream_str, str) else (stream_str or {})
-            network = stream.get("network") or "tcp"
-            security = stream.get("security") or "none"
-            params = ["type=" + network, "security=" + security]
+                host = parsed.hostname or "localhost"
+            # streamSettings может быть stream_settings (snake_case) или строка JSON
+            stream_raw = self._get_nested(obj, "streamSettings", "stream_settings") or "{}"
+            if isinstance(stream_raw, str):
+                stream = json.loads(stream_raw) if stream_raw.strip() else {}
+            else:
+                stream = stream_raw or {}
+            network = self._get_nested(stream, "network", "Network") or "tcp"
+            security = self._get_nested(stream, "security", "Security") or "none"
+            # VLESS требует encryption=none
+            params = ["type=" + str(network), "encryption=none", "security=" + str(security)]
             if security == "reality":
-                reality = stream.get("realitySettings") or {}
+                reality = self._get_nested(stream, "realitySettings", "reality_settings") or {}
                 if isinstance(reality, str):
-                    reality = json.loads(reality) if reality else {}
-                pbk = (reality.get("publicKey") or reality.get("settings", {}).get("publicKey") or "").strip()
+                    reality = json.loads(reality) if reality.strip() else {}
+                if not reality and stream:
+                    reality = stream
+                settings = reality.get("settings") or reality.get("Settings") or {}
+                pbk = (
+                    self._get_nested(reality, "publicKey", "public_key")
+                    or settings.get("publicKey")
+                    or settings.get("public_key")
+                    or ""
+                )
+                if isinstance(pbk, str):
+                    pbk = pbk.strip()
                 sni = ""
-                for key in ("serverNames", "serverName", "dest"):
+                for key in ("serverNames", "server_names", "serverName", "server_name", "dest", "Dest"):
                     v = reality.get(key)
                     if isinstance(v, list) and v:
-                        sni = v[0].split(":")[0] if ":" in str(v[0]) else str(v[0])
+                        sni = str(v[0]).split(":")[0] if ":" in str(v[0]) else str(v[0])
                         break
-                    if isinstance(v, str) and v:
-                        sni = v.split(":")[0]
+                    if isinstance(v, str) and v.strip():
+                        sni = v.split(":")[0].strip()
                         break
-                sid = ""
-                short_ids = reality.get("shortIds") or reality.get("settings", {}).get("shortIds") or []
+                short_ids = (
+                    self._get_nested(reality, "shortIds", "short_ids")
+                    or settings.get("shortIds")
+                    or settings.get("short_ids")
+                    or []
+                )
                 if isinstance(short_ids, str):
                     short_ids = [s.strip() for s in short_ids.split(",") if s.strip()]
-                if short_ids:
-                    sid = short_ids[0]
-                fp = reality.get("fingerprint") or reality.get("settings", {}).get("fingerprint") or "chrome"
-                params.append("fp=" + fp)
+                sid = short_ids[0] if short_ids else ""
+                fp = (
+                    self._get_nested(reality, "fingerprint", "fingerprint")
+                    or settings.get("fingerprint")
+                    or "random"
+                )
+                params.append("fp=" + str(fp))
                 if pbk:
-                    params.append("pbk=" + pbk)
+                    params.append("pbk=" + urllib.parse.quote(str(pbk), safe=""))
                 if sni:
                     params.append("sni=" + urllib.parse.quote(sni, safe=""))
                 if sid:
-                    params.append("sid=" + urllib.parse.quote(sid, safe=""))
+                    params.append("sid=" + urllib.parse.quote(str(sid), safe=""))
                 params.append("spx=%2F")
             query = "&".join(params)
             frag = urllib.parse.quote(client_email, safe="")
