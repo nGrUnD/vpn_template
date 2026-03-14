@@ -1,0 +1,42 @@
+# Пример конфига nginx: reverse proxy для WebApp с HTTPS.
+# Telegram WebApp работает только по HTTPS.
+#
+# 1. Скопируйте в /etc/nginx/sites-available/ и сделайте симлинк в sites-enabled.
+# 2. Замените your-domain.example на ваш домен.
+# 3. Получите сертификат: sudo certbot --nginx -d your-domain.example
+# 4. В .env укажите WEBAPP_URL=https://your-domain.example
+
+server {
+    listen 80;
+    server_name your-domain.example;
+    # Редирект на HTTPS (раскомментировать после настройки certbot)
+    # return 301 https://$server_name$request_uri;
+    # Временно для получения сертификата certbot — проксируем на бэкенд:
+    location / {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# После запуска certbot certbot сам добавит server { listen 443 ssl; ... }.
+# Либо добавьте вручную блок ниже и затем: sudo certbot --nginx -d your-domain.example
+
+# server {
+#     listen 443 ssl;
+#     server_name your-domain.example;
+#     ssl_certificate     /etc/letsencrypt/live/your-domain.example/fullchain.pem;
+#     ssl_certificate_key /etc/letsencrypt/live/your-domain.example/privkey.pem;
+#
+#     location / {
+#         proxy_pass http://127.0.0.1:8081;
+#         proxy_http_version 1.1;
+#         proxy_set_header Host $host;
+#         proxy_set_header X-Real-IP $remote_addr;
+#         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+#         proxy_set_header X-Forwarded-Proto $scheme;
+#     }
+# }
