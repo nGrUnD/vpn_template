@@ -259,39 +259,53 @@ def _admin_html() -> str:
     function toast(msg) { var el = document.getElementById("toast"); el.textContent = msg; el.classList.add("show"); setTimeout(function() { el.classList.remove("show"); }, 2500); }
     function payload(extra) { var p = { telegram_id: telegramId }; for (var k in extra) p[k] = extra[k]; return p; }
     function setStatus(html) { var el = document.getElementById("status"); if (el) el.innerHTML = html; }
+    function showError(msg) {
+      setStatus("");
+      var forbiddenEl = document.getElementById("forbidden");
+      forbiddenEl.innerHTML = msg;
+      forbiddenEl.style.display = "block";
+    }
     function checkAdmin() {
-      var statusEl = document.getElementById("status");
       var forbiddenEl = document.getElementById("forbidden");
       var contentEl = document.getElementById("content");
       if (!telegramId) {
-        setStatus("");
-        forbiddenEl.innerHTML = "Не удалось получить ваш Telegram ID.<br/>Откройте админку из бота: нажмите /start, затем кнопку «Админ-панель».";
-        forbiddenEl.style.display = "block";
+        showError("Не удалось получить ваш Telegram ID.<br/>Откройте админку из бота: нажмите /start, затем кнопку «Админ-панель».");
         return;
       }
       setStatus("<span style=\"color:#94a3b8;\">Проверка доступа…</span>");
-      fetch("/api/admin/me", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telegram_id: telegramId }) })
-        .then(function(r) { return r.json(); })
+      var base = (typeof window !== "undefined" && window.location && window.location.origin) ? window.location.origin : "";
+      var url = base + "/api/admin/me";
+      var body = JSON.stringify({ telegram_id: telegramId });
+      var timeout = 12000;
+      var controller = new AbortController();
+      var tid = setTimeout(function() { controller.abort(); }, timeout);
+      fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: body, signal: controller.signal })
+        .then(function(r) {
+          clearTimeout(tid);
+          if (!r.ok) { throw new Error("HTTP " + r.status); }
+          return r.json().catch(function() { throw new Error("Неверный ответ сервера"); });
+        })
         .then(function(d) {
           if (d && d.ok && d.is_admin) {
             setStatus("");
             contentEl.style.display = "block";
             loadTariffs();
           } else {
-            setStatus("");
-            forbiddenEl.innerHTML = "Доступ только для администраторов.<br/><br/><strong>Ваш Telegram ID:</strong> " + telegramId + "<br/>Добавьте его в <code>BOT_ADMIN_IDS</code> в файле .env на сервере и перезапустите бота.";
-            forbiddenEl.style.display = "block";
+            showError("Доступ только для администраторов.<br/><br/><strong>Ваш Telegram ID:</strong> " + telegramId + "<br/>Добавьте его в <code>BOT_ADMIN_IDS</code> в файле .env на сервере и перезапустите бота.");
           }
         })
         .catch(function(err) {
-          setStatus("");
-          forbiddenEl.innerHTML = "Ошибка при проверке доступа. Убедитесь, что открываете из Telegram (кнопка «Админ-панель»).<br/><br/>Ваш ID: " + (telegramId || "—") + ".";
-          forbiddenEl.style.display = "block";
+          clearTimeout(tid);
+          var isTimeout = err && err.name === "AbortError";
+          showError((isTimeout ? "Таймаут. Сервер не ответил за 12 сек. " : "Ошибка при проверке доступа. ") + "Убедитесь, что открываете из бота (кнопка «Админ-панель»).<br/><br/>Ваш ID: " + (telegramId || "—") + ".");
         });
     }
     function loadTariffs() {
-      fetch("/api/admin/tariffs/list", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telegram_id: telegramId }) })
-        .then(function(r) { return r.json(); })
+      var base = (typeof window !== "undefined" && window.location && window.location.origin) ? window.location.origin : "";
+      var controller = new AbortController();
+      var tid = setTimeout(function() { controller.abort(); }, 10000);
+      fetch(base + "/api/admin/tariffs/list", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telegram_id: telegramId }), signal: controller.signal })
+        .then(function(r) { clearTimeout(tid); return r.ok ? r.json() : Promise.reject(new Error(r.status)); })
         .then(function(d) {
           var tbody = document.getElementById("tariffs-tbody");
           if (!d || !d.ok) { tbody.innerHTML = "<tr><td colspan=\"8\">Ошибка загрузки</td></tr>"; return; }
@@ -304,7 +318,7 @@ def _admin_html() -> str:
             btn.onclick = function() { deleteTariff(parseInt(btn.dataset.id, 10)); };
           });
         })
-        .catch(function() { var tbody = document.getElementById("tariffs-tbody"); tbody.innerHTML = "<tr><td colspan=\"8\">Ошибка сети</td></tr>"; });
+        .catch(function() { clearTimeout(tid); var tbody = document.getElementById("tariffs-tbody"); if (tbody) tbody.innerHTML = "<tr><td colspan=\"8\">Ошибка сети или таймаут</td></tr>"; });
     }
     function createTariff() {
       var name = document.getElementById("new-name").value.trim();
