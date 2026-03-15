@@ -925,11 +925,14 @@ async def handle_index(request: web.Request) -> web.Response:
     <div class="wallet-card">
       <div class="label">VPN баланс</div>
       <div class="value" id="wallet-balance">0 ⭐</div>
-      <div class="wallet-note" id="wallet-rate-note">Баланс, тарифы и продление работают напрямую в Telegram Stars.</div>
+      <div class="wallet-note" id="wallet-rate-note">Пополните VPN-баланс и оплатите тариф Stars напрямую внутри Telegram.</div>
       <div class="topup-grid">
-        <button type="button" class="topup-btn" data-stars="100">100 ⭐</button>
-        <button type="button" class="topup-btn" data-stars="300">300 ⭐</button>
-        <button type="button" class="topup-btn" data-stars="500">500 ⭐</button>
+        <button type="button" class="topup-btn" data-stars="1">1 ⭐</button>
+        <button type="button" class="topup-btn" data-stars="55">55 ⭐ · 100 ₽</button>
+        <button type="button" class="topup-btn" data-stars="100">100 ⭐ · 182 ₽</button>
+        <button type="button" class="topup-btn" data-stars="140">140 ⭐ · 255 ₽</button>
+        <button type="button" class="topup-btn" data-stars="250">250 ⭐ · 6 мес.</button>
+        <button type="button" class="topup-btn" data-stars="500">500 ⭐ · 12 мес.</button>
       </div>
     </div>
 
@@ -1032,7 +1035,7 @@ async def handle_index(request: web.Request) -> web.Response:
         const buttonLabel = tariffsModalMode === "renew" ? "Продлить" : "Купить";
         return '<div class="tariff-card">' +
           '<div class="name">' + t.name + '</div>' +
-          '<div class="meta">' + t.months + ' мес. · ' + t.traffic_gb + ' GB трафика</div>' +
+          '<div class="meta">' + (t.duration_label || t.name) + ' · ' + t.traffic_gb + ' GB трафика</div>' +
           '<div class="price">' + t.price_stars + ' ⭐' + badge + '</div>' +
           '<button type="button" data-tariff-id="' + t.id + '">' + buttonLabel + '</button>' +
           '<div class="hint">Списывается со Stars-баланса</div>' +

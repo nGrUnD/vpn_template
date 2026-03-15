@@ -12,6 +12,13 @@ from app.threexui_client import ThreeXUIClient, ThreeXUIClientInfo
 INBOUND_ID_FOR_SYNC = 1
 
 
+def _resolve_duration_days(months: int | None, tariff_name: str | None) -> int:
+    name = (tariff_name or "").strip().lower()
+    if "3 дня" in name:
+        return 3
+    return max(int(months or 0), 1) * 30
+
+
 def _build_device_label(device_os: str | None, sequence: int) -> str | None:
     if not device_os:
         return None
@@ -147,7 +154,7 @@ async def create_subscription_from_tariff(
     device_os: str | None = None,
 ) -> asyncpg.Record:
     """Создать обычную VPN-подписку по тарифу."""
-    expire_days = max(int(months), 1) * 30
+    expire_days = _resolve_duration_days(months, tariff_name)
     total_gb = int(traffic_gb or 0)
     device_sequence = await _next_device_sequence(db_user_id, device_os)
     device_label = _build_device_label(device_os, device_sequence)
@@ -237,9 +244,12 @@ async def extend_subscription_for_user(
         traffic_gb = int(traffic_gb if traffic_gb is not None else (row["effective_tariff_traffic_gb"] or 0))
         client_id = row["threexui_client_id"]
         if months <= 0 or not client_id:
-            return None
-
-        expire_days = max(months, 1) * 30
+            tariff_name = row.get("server_label")
+            if not client_id:
+                return None
+            expire_days = _resolve_duration_days(months, tariff_name)
+        else:
+            expire_days = _resolve_duration_days(months, row.get("server_label"))
         updated = await threexui.extend_client(
             INBOUND_ID_FOR_SYNC,
             client_id,

@@ -10,6 +10,16 @@ from .config import DatabaseConfig
 _pool: Optional[asyncpg.Pool] = None
 
 
+DEFAULT_TARIFFS = [
+    {"name": "3 дня", "months": 0, "price_stars": 1, "traffic_gb": 3, "badge": "Тест", "sort_order": 0},
+    {"name": "1 месяц", "months": 1, "price_stars": 55, "traffic_gb": 30, "badge": None, "sort_order": 1},
+    {"name": "2 месяца", "months": 2, "price_stars": 100, "traffic_gb": 60, "badge": "−9%", "sort_order": 2},
+    {"name": "3 месяца", "months": 3, "price_stars": 140, "traffic_gb": 100, "badge": "−15%", "sort_order": 3},
+    {"name": "6 месяцев", "months": 6, "price_stars": 250, "traffic_gb": 250, "badge": "−24%", "sort_order": 4},
+    {"name": "12 месяцев", "months": 12, "price_stars": 500, "traffic_gb": 500, "badge": "−24%", "sort_order": 5},
+]
+
+
 async def init_db(db_config: DatabaseConfig) -> None:
     """
     Initialize global connection pool and ensure base tables exist.
@@ -170,20 +180,42 @@ async def init_db(db_config: DatabaseConfig) -> None:
             """
         )
 
-        # Дефолтные тарифы при первом запуске
-        n = await conn.fetchval("SELECT COUNT(*) FROM tariffs")
-        if n == 0:
-            await conn.executemany(
-                """
-                INSERT INTO tariffs (name, months, price_rub, price_stars, traffic_gb, badge, sort_order)
-                VALUES ($1, $2, $3, $4, $5, $6, $7);
-                """,
-                [
-                    ("1 месяц", 1, 300, 300, 30, None, 0),
-                    ("3 месяца", 3, 750, 750, 100, "−17%", 1),
-                    ("12 месяцев", 12, 2400, 2400, 500, "−33%", 2),
-                ],
-            )
+        # Синхронизация дефолтных тарифов. Кастомные тарифы не трогаем.
+        for item in DEFAULT_TARIFFS:
+            existing_id = await conn.fetchval("SELECT id FROM tariffs WHERE name = $1 ORDER BY id ASC LIMIT 1", item["name"])
+            if existing_id:
+                await conn.execute(
+                    """
+                    UPDATE tariffs
+                    SET months = $2,
+                        price_rub = $3,
+                        price_stars = $3,
+                        traffic_gb = $4,
+                        badge = $5,
+                        sort_order = $6,
+                        is_active = TRUE
+                    WHERE id = $1
+                    """,
+                    existing_id,
+                    item["months"],
+                    item["price_stars"],
+                    item["traffic_gb"],
+                    item["badge"],
+                    item["sort_order"],
+                )
+            else:
+                await conn.execute(
+                    """
+                    INSERT INTO tariffs (name, months, price_rub, price_stars, traffic_gb, badge, sort_order)
+                    VALUES ($1, $2, $3, $3, $4, $5, $6)
+                    """,
+                    item["name"],
+                    item["months"],
+                    item["price_stars"],
+                    item["traffic_gb"],
+                    item["badge"],
+                    item["sort_order"],
+                )
 
 
 async def get_pool() -> asyncpg.Pool:

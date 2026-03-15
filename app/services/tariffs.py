@@ -25,6 +25,7 @@ async def get_tariffs(active_only: bool = True) -> list[dict[str, Any]]:
             "id": r["id"],
             "name": r["name"],
             "months": r["months"],
+            "duration_label": r["name"] if int(r["months"] or 0) <= 0 else f"{r['months']} мес.",
             "price_stars": r["price_stars"],
             "traffic_gb": r["traffic_gb"],
             "badge": r["badge"],
