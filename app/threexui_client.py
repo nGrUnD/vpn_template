@@ -41,7 +41,6 @@ class ThreeXUIClient:
         self._config = config
         self._client = httpx.AsyncClient(base_url=config.base_url, timeout=15.0)
         self._auth_cookies: dict[str, str] = {}
-        self._client_ips_path_template: str | bool | None = None
 
     async def _ensure_login(self) -> None:
         """
@@ -168,69 +167,46 @@ class ThreeXUIClient:
                 return data.get("data")
         return data
 
+    def _normalize_ip_string(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        lowered = text.lower()
+        if lowered in {"no ip record", "error loading ips", "null", "none"}:
+            return None
+        if " (" in text:
+            text = text.split(" (", 1)[0].strip()
+        return text or None
+
     def _parse_client_ips_payload(self, payload: Any) -> dict[str, Any]:
         unique_ips: list[str] = []
 
         def add_ip(value: Any) -> None:
-            if value is None:
-                return
-            ip = str(value).strip()
+            ip = self._normalize_ip_string(value)
             if not ip or ip in unique_ips:
                 return
             unique_ips.append(ip)
 
-        def walk(value: Any) -> None:
-            if value is None:
-                return
-            if isinstance(value, str):
-                stripped = value.strip()
-                if not stripped:
-                    return
-                if "," in stripped:
-                    for part in stripped.split(","):
-                        add_ip(part)
-                    return
-                add_ip(stripped)
-                return
-            if isinstance(value, list):
-                for item in value:
-                    walk(item)
-                return
-            if isinstance(value, dict):
-                preferred_keys = (
-                    "ip",
-                    "address",
-                    "clientIp",
-                    "client_ip",
-                    "remoteAddr",
-                    "remote_addr",
-                )
-                for key in preferred_keys:
-                    if value.get(key):
-                        add_ip(value.get(key))
-                if unique_ips:
-                    return
-                for key, item in value.items():
-                    lowered = str(key).lower()
-                    if lowered in {"createdat", "updatedat", "lastseen", "time", "email"}:
-                        continue
-                    if isinstance(item, (dict, list)):
-                        walk(item)
-                    else:
-                        add_ip(key)
-                return
+        if isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, dict):
+                    add_ip(item.get("ip") or item.get("IP"))
+                else:
+                    add_ip(item)
+        elif isinstance(payload, dict):
+            add_ip(payload.get("ip") or payload.get("IP"))
+        else:
+            add_ip(payload)
 
-        walk(payload)
-        return {
-            "available": True,
-            "ips": unique_ips,
-            "ip_count": len(unique_ips),
-        }
+        return {"available": True, "ips": unique_ips, "ip_count": len(unique_ips)}
 
     async def get_client_ips(self, inbound_id: int, client_uuid: str) -> dict[str, Any]:
         """
-        Получить список IP клиента из 3x-ui, если версия панели поддерживает API clientIps.
-        Возвращает graceful fallback с available=False, если API отсутствует.
+        Получить список IP клиента из MHSanaei/3x-ui.
+        В этой панели endpoint работает по email клиента:
+        POST /panel/api/inbounds/clientIps/:email
         """
         await self._ensure_login()
         inbound = await self._get_inbound(inbound_id)
@@ -241,52 +217,41 @@ class ThreeXUIClient:
         if not target:
             return {"available": False, "ips": [], "ip_count": 0}
 
-        identifiers: list[str] = []
-        for candidate in (target.get("email"), client_uuid):
-            normalized = str(candidate or "").strip()
-            if normalized and normalized not in identifiers:
-                identifiers.append(normalized)
-        if not identifiers:
+        client_email = str(target.get("email") or "").strip()
+        if not client_email:
+            return {"available": False, "ips": [], "ip_count": 0}
+        path = f"/panel/api/inbounds/clientIps/{urllib.parse.quote(client_email, safe='')}"
+        try:
+            response = await self._client.post(path, cookies=self._auth_cookies)
+            if response.status_code == 404:
+                return {"available": False, "ips": [], "ip_count": 0}
+            response.raise_for_status()
+            data = response.json()
+            payload = self._extract_payload(data)
+            return self._parse_client_ips_payload(payload)
+        except Exception:
             return {"available": False, "ips": [], "ip_count": 0}
 
-        def build_candidate_paths(identifier: str) -> list[str]:
-            encoded = urllib.parse.quote(identifier, safe="")
-            if isinstance(self._client_ips_path_template, str):
-                return [self._client_ips_path_template.format(identifier=encoded, inbound_id=inbound_id)]
-            return [
-                f"/panel/api/inbounds/clientIps/{encoded}",
-                f"/panel/api/inbounds/clientIps/{inbound_id}/{encoded}",
-                f"/panel/api/inbounds/clientIps/{encoded}?inboundId={inbound_id}",
-                f"/panel/api/inbounds/clientIps/{encoded}?inbound_id={inbound_id}",
-                f"/panel/api/inbounds/clientIps/{encoded}?id={inbound_id}",
-            ]
-
-        saw_supported_response = False
-        for identifier in identifiers:
-            for path in build_candidate_paths(identifier):
-                try:
-                    response = await self._client.get(path, cookies=self._auth_cookies)
-                    if response.status_code == 404:
-                        continue
-                    response.raise_for_status()
-                    data = response.json()
-                    saw_supported_response = True
-                    if isinstance(self._client_ips_path_template, bool):
-                        self._client_ips_path_template = None
-                    if not isinstance(self._client_ips_path_template, str):
-                        path_template = path.replace(
-                            urllib.parse.quote(identifier, safe=""),
-                            "{identifier}",
-                        ).replace(str(inbound_id), "{inbound_id}", 1)
-                        self._client_ips_path_template = path_template
-                    payload = self._extract_payload(data)
-                    return self._parse_client_ips_payload(payload)
-                except Exception:
-                    continue
-
-        if not saw_supported_response and self._client_ips_path_template is None:
-            self._client_ips_path_template = False
-        return {"available": False, "ips": [], "ip_count": 0}
+    async def get_online_clients(self) -> dict[str, Any]:
+        """
+        Получить список online-клиентов из MHSanaei/3x-ui:
+        POST /panel/api/inbounds/onlines
+        """
+        await self._ensure_login()
+        try:
+            response = await self._client.post("/panel/api/inbounds/onlines", cookies=self._auth_cookies)
+            if response.status_code == 404:
+                return {"available": False, "clients": []}
+            response.raise_for_status()
+            data = response.json()
+            payload = self._extract_payload(data)
+            if isinstance(payload, list):
+                clients = [str(item).strip() for item in payload if str(item).strip()]
+            else:
+                clients = []
+            return {"available": True, "clients": clients}
+        except Exception:
+            return {"available": False, "clients": []}
 
     async def get_client_traffic(self, inbound_id: int, client_uuid: str) -> Optional[dict[str, Any]]:
         """
