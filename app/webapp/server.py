@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 from html import escape
 from typing import Any, Dict, List
 
@@ -7,6 +8,7 @@ from aiohttp import ClientSession, web
 from aiogram import Bot
 from aiogram.types import LabeledPrice
 
+from app.db import get_pool
 from app.services.subscriptions import (
     create_subscription_from_tariff,
     create_test_subscription,
@@ -493,17 +495,1238 @@ async def handle_admin_tariffs_delete(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "deleted": deleted})
 
 
-def _admin_html(tariffs: List[Dict[str, Any]], status: str | None = None, error: str | None = None) -> str:
+def _admin_person_label(row: Dict[str, Any]) -> str:
+    full_name = " ".join(part for part in [row.get("first_name"), row.get("last_name")] if part)
+    username = row.get("username")
+    telegram_id = row.get("telegram_id")
+    if username:
+        return f"@{escape(str(username))}"
+    if full_name:
+        return escape(full_name)
+    return f"ID {telegram_id}"
+
+
+async def _admin_fetch_overview_metrics() -> Dict[str, int]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM users) AS users_count,
+                (SELECT COUNT(*) FROM subscriptions WHERE is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW())) AS active_subscriptions,
+                (SELECT COUNT(*) FROM subscriptions WHERE is_active = TRUE AND expires_at IS NOT NULL AND expires_at > NOW() AND expires_at <= NOW() + INTERVAL '7 days') AS expiring_soon,
+                (SELECT COUNT(*) FROM wallet_transactions WHERE status = 'paid') AS paid_transactions,
+                (SELECT COUNT(*) FROM wallet_transactions WHERE kind = 'topup' AND status = 'pending') AS pending_topups,
+                (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE kind = 'topup' AND status = 'paid' AND amount > 0) AS topup_volume,
+                (SELECT COALESCE(SUM(vpn_balance_stars), 0) FROM users) AS total_balance
+            """
+        )
+    return {
+        "users_count": int(row["users_count"] or 0),
+        "active_subscriptions": int(row["active_subscriptions"] or 0),
+        "expiring_soon": int(row["expiring_soon"] or 0),
+        "paid_transactions": int(row["paid_transactions"] or 0),
+        "pending_topups": int(row["pending_topups"] or 0),
+        "topup_volume": int(row["topup_volume"] or 0),
+        "total_balance": int(row["total_balance"] or 0),
+    }
+
+
+async def _admin_fetch_payments_data(limit: int = 50, q: str = "", status: str = "", kind: str = "") -> Dict[str, Any]:
+    pool = await get_pool()
+    filters: List[str] = []
+    params: List[Any] = []
+    if q:
+        params.append(f"%{q}%")
+        idx = len(params)
+        filters.append(
+            f"(u.username ILIKE ${idx} OR u.first_name ILIKE ${idx} OR u.last_name ILIKE ${idx} "
+            f"OR wt.description ILIKE ${idx} OR CAST(u.telegram_id AS TEXT) ILIKE ${idx})"
+        )
+    if status:
+        params.append(status)
+        filters.append(f"wt.status = ${len(params)}")
+    if kind:
+        params.append(kind)
+        filters.append(f"wt.kind = ${len(params)}")
+    where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
+    async with pool.acquire() as conn:
+        stats = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE kind = 'topup' AND status = 'paid') AS paid_topups,
+                COUNT(*) FILTER (WHERE kind = 'topup' AND status = 'pending') AS pending_topups,
+                COUNT(*) FILTER (WHERE kind = 'purchase' AND status = 'paid') AS purchases_count,
+                COUNT(*) FILTER (WHERE kind = 'refund' AND status = 'paid') AS refunds_count,
+                COALESCE(SUM(amount) FILTER (WHERE kind = 'topup' AND status = 'paid' AND amount > 0), 0) AS topup_volume,
+                COALESCE(SUM(ABS(amount)) FILTER (WHERE kind = 'purchase' AND status = 'paid'), 0) AS purchase_volume
+            FROM wallet_transactions
+            """
+        )
+        rows = await conn.fetch(
+            f"""
+            SELECT
+                wt.id,
+                wt.kind,
+                wt.status,
+                wt.amount,
+                wt.currency,
+                wt.provider_amount,
+                wt.provider_currency,
+                wt.description,
+                wt.payload,
+                wt.created_at,
+                wt.paid_at,
+                u.telegram_id,
+                u.username,
+                u.first_name,
+                u.last_name
+            FROM wallet_transactions wt
+            JOIN users u ON u.id = wt.user_id
+            {where_sql}
+            ORDER BY wt.created_at DESC
+            LIMIT ${len(params) + 1}
+            """,
+            *params,
+            limit,
+        )
+    return {
+        "stats": {
+            "paid_topups": int(stats["paid_topups"] or 0),
+            "pending_topups": int(stats["pending_topups"] or 0),
+            "purchases_count": int(stats["purchases_count"] or 0),
+            "refunds_count": int(stats["refunds_count"] or 0),
+            "topup_volume": int(stats["topup_volume"] or 0),
+            "purchase_volume": int(stats["purchase_volume"] or 0),
+        },
+        "rows": list(rows),
+    }
+
+
+async def _admin_fetch_devices_data(limit: int = 50, q: str = "", status: str = "", os_name: str = "") -> Dict[str, Any]:
+    pool = await get_pool()
+    filters: List[str] = []
+    params: List[Any] = []
+    if q:
+        params.append(f"%{q}%")
+        idx = len(params)
+        filters.append(
+            f"(u.username ILIKE ${idx} OR u.first_name ILIKE ${idx} OR u.last_name ILIKE ${idx} "
+            f"OR s.server_label ILIKE ${idx} OR s.device_os ILIKE ${idx} OR CAST(u.telegram_id AS TEXT) ILIKE ${idx})"
+        )
+    if os_name:
+        params.append(os_name)
+        filters.append(f"s.device_os = ${len(params)}")
+    if status == "active":
+        filters.append("s.is_active = TRUE AND (s.expires_at IS NULL OR s.expires_at > NOW())")
+    elif status == "inactive":
+        filters.append("s.is_active = FALSE")
+    elif status == "expired":
+        filters.append("s.expires_at IS NOT NULL AND s.expires_at <= NOW()")
+    elif status == "expiring":
+        filters.append("s.is_active = TRUE AND s.expires_at IS NOT NULL AND s.expires_at > NOW() AND s.expires_at <= NOW() + INTERVAL '7 days'")
+    where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
+    async with pool.acquire() as conn:
+        stats = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*) AS total_devices,
+                COUNT(*) FILTER (WHERE is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW())) AS active_devices,
+                COUNT(*) FILTER (WHERE is_active = FALSE) AS disabled_devices,
+                COUNT(*) FILTER (WHERE expires_at IS NOT NULL AND expires_at <= NOW()) AS expired_devices,
+                COUNT(*) FILTER (WHERE is_active = TRUE AND expires_at IS NOT NULL AND expires_at > NOW() AND expires_at <= NOW() + INTERVAL '7 days') AS expiring_soon,
+                COUNT(DISTINCT user_id) AS users_with_devices
+            FROM subscriptions
+            """
+        )
+        rows = await conn.fetch(
+            f"""
+            SELECT
+                s.id,
+                s.server_label,
+                s.threexui_client_id,
+                s.device_os,
+                s.is_active,
+                s.expires_at,
+                s.created_at,
+                COALESCE(s.tariff_price_stars, s.tariff_price_rub, t.price_stars, t.price_rub) AS price_stars,
+                COALESCE(s.tariff_months, t.months) AS months,
+                COALESCE(s.tariff_traffic_gb, t.traffic_gb) AS traffic_gb,
+                u.telegram_id,
+                u.username,
+                u.first_name,
+                u.last_name
+            FROM subscriptions s
+            JOIN users u ON u.id = s.user_id
+            LEFT JOIN tariffs t ON t.id = s.tariff_id OR (s.tariff_id IS NULL AND t.name = s.server_label)
+            {where_sql}
+            ORDER BY s.created_at DESC
+            LIMIT ${len(params) + 1}
+            """,
+            *params,
+            limit,
+        )
+    return {
+        "stats": {
+            "total_devices": int(stats["total_devices"] or 0),
+            "active_devices": int(stats["active_devices"] or 0),
+            "disabled_devices": int(stats["disabled_devices"] or 0),
+            "expired_devices": int(stats["expired_devices"] or 0),
+            "expiring_soon": int(stats["expiring_soon"] or 0),
+            "users_with_devices": int(stats["users_with_devices"] or 0),
+        },
+        "rows": list(rows),
+    }
+
+
+async def _admin_get_subscription_row(subscription_id: int) -> Dict[str, Any] | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                s.id,
+                s.user_id,
+                s.server_label,
+                s.threexui_client_id,
+                s.is_active,
+                s.expires_at,
+                u.telegram_id,
+                COALESCE(s.tariff_months, t.months, 1) AS tariff_months,
+                COALESCE(s.tariff_traffic_gb, t.traffic_gb, 0) AS tariff_traffic_gb
+            FROM subscriptions s
+            JOIN users u ON u.id = s.user_id
+            LEFT JOIN tariffs t ON t.id = s.tariff_id OR (s.tariff_id IS NULL AND t.name = s.server_label)
+            WHERE s.id = $1
+            """,
+            subscription_id,
+        )
+    return dict(row) if row else None
+
+
+async def _admin_extend_subscription_manual(*, subscription_id: int, days: int, threexui: ThreeXUIClient) -> bool:
+    row = await _admin_get_subscription_row(subscription_id)
+    if not row or not row.get("threexui_client_id") or days <= 0:
+        return False
+    tariff_months = max(int(row.get("tariff_months") or 1), 1)
+    tariff_traffic = int(row.get("tariff_traffic_gb") or 0)
+    period_days = max(tariff_months * 30, 1)
+    add_traffic_gb = max(1, round(tariff_traffic * days / period_days)) if tariff_traffic > 0 else 1
+    updated = await threexui.extend_client(
+        1,
+        str(row["threexui_client_id"]),
+        add_days=days,
+        add_total_gb=add_traffic_gb,
+    )
+    if not updated:
+        return False
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        current_expiry = row.get("expires_at")
+        now = dt.datetime.now(dt.timezone.utc)
+        base = current_expiry if current_expiry and current_expiry > now else now
+        new_expiry = base + dt.timedelta(days=days)
+        await conn.execute(
+            """
+            UPDATE subscriptions
+            SET expires_at = $2,
+                is_active = TRUE
+            WHERE id = $1
+            """,
+            subscription_id,
+            new_expiry,
+        )
+    return True
+
+
+async def _admin_deactivate_subscription(subscription_id: int) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE subscriptions
+            SET is_active = FALSE,
+                expires_at = NOW()
+            WHERE id = $1
+            """,
+            subscription_id,
+        )
+    return result == "UPDATE 1"
+
+
+async def _admin_fetch_users_data(limit: int = 50, q: str = "", segment: str = "") -> Dict[str, Any]:
+    pool = await get_pool()
+    filters: List[str] = []
+    params: List[Any] = []
+    if q:
+        params.append(f"%{q}%")
+        idx = len(params)
+        filters.append(
+            f"(u.username ILIKE ${idx} OR u.first_name ILIKE ${idx} OR u.last_name ILIKE ${idx} "
+            f"OR CAST(u.telegram_id AS TEXT) ILIKE ${idx})"
+        )
+    if segment == "with_balance":
+        filters.append("u.vpn_balance_stars > 0")
+    elif segment == "with_devices":
+        filters.append("COALESCE(dev.active_devices, 0) > 0")
+    elif segment == "with_payments":
+        filters.append("COALESCE(tx.total_transactions, 0) > 0")
+    where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
+    async with pool.acquire() as conn:
+        stats = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*) AS total_users,
+                COUNT(*) FILTER (WHERE vpn_balance_stars > 0) AS users_with_balance,
+                COALESCE(SUM(vpn_balance_stars), 0) AS total_balance
+            FROM users
+            """
+        )
+        rows = await conn.fetch(
+            f"""
+            SELECT
+                u.id,
+                u.telegram_id,
+                u.username,
+                u.first_name,
+                u.last_name,
+                u.vpn_balance_stars,
+                u.created_at,
+                COALESCE(dev.active_devices, 0) AS active_devices,
+                COALESCE(dev.total_devices, 0) AS total_devices,
+                COALESCE(tx.total_transactions, 0) AS total_transactions,
+                tx.last_transaction_at
+            FROM users u
+            LEFT JOIN (
+                SELECT
+                    user_id,
+                    COUNT(*) AS total_devices,
+                    COUNT(*) FILTER (WHERE is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW())) AS active_devices
+                FROM subscriptions
+                GROUP BY user_id
+            ) dev ON dev.user_id = u.id
+            LEFT JOIN (
+                SELECT
+                    user_id,
+                    COUNT(*) AS total_transactions,
+                    MAX(created_at) AS last_transaction_at
+                FROM wallet_transactions
+                GROUP BY user_id
+            ) tx ON tx.user_id = u.id
+            {where_sql}
+            ORDER BY u.created_at DESC
+            LIMIT ${len(params) + 1}
+            """,
+            *params,
+            limit,
+        )
+    return {
+        "stats": {
+            "total_users": int(stats["total_users"] or 0),
+            "users_with_balance": int(stats["users_with_balance"] or 0),
+            "total_balance": int(stats["total_balance"] or 0),
+        },
+        "rows": list(rows),
+    }
+
+
+async def _admin_fetch_user_profile(user_id: int) -> Dict[str, Any] | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        user = await conn.fetchrow(
+            """
+            SELECT
+                u.id,
+                u.telegram_id,
+                u.username,
+                u.first_name,
+                u.last_name,
+                u.vpn_balance_stars,
+                u.created_at
+            FROM users u
+            WHERE u.id = $1
+            """,
+            user_id,
+        )
+        if not user:
+            return None
+        device_stats = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*) AS total_devices,
+                COUNT(*) FILTER (WHERE is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW())) AS active_devices
+            FROM subscriptions
+            WHERE user_id = $1
+            """,
+            user_id,
+        )
+        tx_stats = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*) AS total_transactions,
+                COALESCE(SUM(amount) FILTER (WHERE amount > 0), 0) AS total_income,
+                COALESCE(SUM(ABS(amount)) FILTER (WHERE amount < 0), 0) AS total_outcome
+            FROM wallet_transactions
+            WHERE user_id = $1
+            """,
+            user_id,
+        )
+        devices = await conn.fetch(
+            """
+            SELECT
+                id,
+                server_label,
+                device_os,
+                is_active,
+                expires_at,
+                COALESCE(tariff_price_stars, tariff_price_rub, 0) AS price_stars,
+                COALESCE(tariff_traffic_gb, 0) AS traffic_gb,
+                created_at
+            FROM subscriptions
+            WHERE user_id = $1
+            ORDER BY created_at DESC
+            LIMIT 20
+            """,
+            user_id,
+        )
+        transactions = await conn.fetch(
+            """
+            SELECT
+                id,
+                kind,
+                status,
+                amount,
+                description,
+                provider_amount,
+                provider_currency,
+                created_at
+            FROM wallet_transactions
+            WHERE user_id = $1
+            ORDER BY created_at DESC
+            LIMIT 20
+            """,
+            user_id,
+        )
+    return {
+        "user": dict(user),
+        "device_stats": {
+            "total_devices": int(device_stats["total_devices"] or 0),
+            "active_devices": int(device_stats["active_devices"] or 0),
+        },
+        "tx_stats": {
+            "total_transactions": int(tx_stats["total_transactions"] or 0),
+            "total_income": int(tx_stats["total_income"] or 0),
+            "total_outcome": int(tx_stats["total_outcome"] or 0),
+        },
+        "devices": list(devices),
+        "transactions": list(transactions),
+    }
+
+
+async def _admin_adjust_user_balance(*, user_id: int, delta: int, description: str) -> bool:
+    if delta == 0:
+        return False
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if delta > 0:
+                row = await conn.fetchrow(
+                    """
+                    UPDATE users
+                    SET vpn_balance_stars = vpn_balance_stars + $2
+                    WHERE id = $1
+                    RETURNING vpn_balance_stars
+                    """,
+                    user_id,
+                    delta,
+                )
+            else:
+                row = await conn.fetchrow(
+                    """
+                    UPDATE users
+                    SET vpn_balance_stars = vpn_balance_stars + $2
+                    WHERE id = $1 AND vpn_balance_stars >= $3
+                    RETURNING vpn_balance_stars
+                    """,
+                    user_id,
+                    delta,
+                    abs(delta),
+                )
+            if not row:
+                return False
+            await conn.execute(
+                """
+                INSERT INTO wallet_transactions (
+                    user_id, kind, status, amount, currency, description
+                ) VALUES ($1, 'admin_adjustment', 'paid', $2, 'XTR', $3)
+                """,
+                user_id,
+                delta,
+                description,
+            )
+    return True
+
+
+async def _admin_fetch_analytics_data(days: int = 14) -> Dict[str, Any]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        core = await conn.fetchrow(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM users) AS total_users,
+                (SELECT COUNT(*) FROM users WHERE created_at >= NOW() - make_interval(days => $1)) AS new_users_period,
+                (SELECT COUNT(*) FROM subscriptions) AS total_devices,
+                (SELECT COUNT(*) FROM subscriptions WHERE created_at >= NOW() - make_interval(days => $1)) AS new_devices_period,
+                (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE kind = 'topup' AND status = 'paid' AND amount > 0) AS total_topups,
+                (SELECT COALESCE(SUM(ABS(amount)), 0) FROM wallet_transactions WHERE kind = 'purchase' AND status = 'paid') AS total_purchases,
+                (SELECT COUNT(DISTINCT user_id) FROM wallet_transactions WHERE kind = 'topup' AND status = 'paid') AS paying_users,
+                (SELECT COUNT(DISTINCT user_id) FROM wallet_transactions WHERE kind = 'purchase' AND status = 'paid') AS buying_users,
+                (SELECT COUNT(DISTINCT user_id) FROM subscriptions WHERE is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW())) AS active_users
+            """,
+            days,
+        )
+        tariff_rows = await conn.fetch(
+            """
+            SELECT
+                COALESCE(t.name, s.server_label, 'Без тарифа') AS label,
+                COUNT(*) AS cnt
+            FROM subscriptions s
+            LEFT JOIN tariffs t ON t.id = s.tariff_id
+            GROUP BY COALESCE(t.name, s.server_label, 'Без тарифа')
+            ORDER BY cnt DESC, label ASC
+            LIMIT 5
+            """
+        )
+        platform_rows = await conn.fetch(
+            """
+            SELECT
+                COALESCE(device_os, 'Не указано') AS label,
+                COUNT(*) AS cnt
+            FROM subscriptions
+            GROUP BY COALESCE(device_os, 'Не указано')
+            ORDER BY cnt DESC, label ASC
+            LIMIT 5
+            """
+        )
+        users_daily_rows = await conn.fetch(
+            """
+            SELECT DATE(created_at) AS day, COUNT(*) AS cnt
+            FROM users
+            WHERE created_at >= CURRENT_DATE - ($1::int - 1)
+            GROUP BY DATE(created_at)
+            ORDER BY day ASC
+            """,
+            days,
+        )
+        revenue_daily_rows = await conn.fetch(
+            """
+            SELECT DATE(created_at) AS day, COALESCE(SUM(amount), 0) AS amount
+            FROM wallet_transactions
+            WHERE kind = 'topup' AND status = 'paid' AND amount > 0
+              AND created_at >= CURRENT_DATE - ($1::int - 1)
+            GROUP BY DATE(created_at)
+            ORDER BY day ASC
+            """,
+            days,
+        )
+
+    today = dt.date.today()
+    users_by_day = {row["day"]: int(row["cnt"] or 0) for row in users_daily_rows}
+    revenue_by_day = {row["day"]: int(row["amount"] or 0) for row in revenue_daily_rows}
+    trend = []
+    for offset in range(days - 1, -1, -1):
+        day = today - dt.timedelta(days=offset)
+        trend.append(
+            {
+                "label": day.strftime("%d.%m"),
+                "users": users_by_day.get(day, 0),
+                "topups": revenue_by_day.get(day, 0),
+            }
+        )
+
+    return {
+        "core": {
+            "total_users": int(core["total_users"] or 0),
+            "new_users_period": int(core["new_users_period"] or 0),
+            "total_devices": int(core["total_devices"] or 0),
+            "new_devices_period": int(core["new_devices_period"] or 0),
+            "total_topups": int(core["total_topups"] or 0),
+            "total_purchases": int(core["total_purchases"] or 0),
+            "paying_users": int(core["paying_users"] or 0),
+            "buying_users": int(core["buying_users"] or 0),
+            "active_users": int(core["active_users"] or 0),
+        },
+        "top_tariffs": [{"label": str(row["label"]), "value": int(row["cnt"] or 0)} for row in tariff_rows],
+        "top_platforms": [{"label": str(row["label"]), "value": int(row["cnt"] or 0)} for row in platform_rows],
+        "trend": trend,
+        "days": days,
+    }
+
+
+def _admin_device_row_html(row: Dict[str, Any], *, redirect_query: str = "") -> str:
+    now = dt.datetime.now(dt.timezone.utc)
+    expires_at = row.get("expires_at")
+    is_live = bool(row.get("is_active")) and (expires_at is None or expires_at > now)
+    status_text = "Активно" if is_live else "Неактивно"
+    status_class = "active" if is_live else "inactive"
+    expires_text = expires_at.strftime("%d.%m.%Y") if expires_at else "—"
+    redirect_input = f'<input type="hidden" name="redirect" value="{escape(redirect_query)}" />' if redirect_query else ""
+    return (
+        "<tr>"
+        f"<td>{row['id']}</td>"
+        f"<td>{_admin_person_label(row)}<br><span style=\"color:#94a3b8;font-size:12px;\">TG {row['telegram_id']}</span></td>"
+        f"<td>{escape(str(row.get('device_os') or '—'))}</td>"
+        f"<td>{escape(str(row.get('server_label') or '—'))}</td>"
+        f"<td>{int(row.get('price_stars') or 0)} ⭐</td>"
+        f"<td>{int(row.get('traffic_gb') or 0)} GB</td>"
+        f"<td>{expires_text}</td>"
+        f"<td><span class=\"badge {status_class}\">{status_text}</span></td>"
+        "<td><div class=\"cell-actions\">"
+        f"<a class=\"btn\" href=\"/admin/devices?q={row['telegram_id']}\">Все устройства</a>"
+        f"<form method=\"post\" action=\"/admin/devices/{row['id']}/extend\" class=\"mini-form\">{redirect_input}<input type=\"number\" name=\"days\" min=\"1\" value=\"30\" /><button type=\"submit\" class=\"primary\">Продлить</button></form>"
+        f"<form method=\"post\" action=\"/admin/devices/{row['id']}/deactivate\" class=\"mini-form\" onsubmit=\"return confirm('Деактивировать устройство?');\">{redirect_input}<button type=\"submit\" class=\"danger\">Деактивировать</button></form>"
+        "</div></td>"
+        "</tr>"
+    )
+
+
+def _admin_notice_html(status: str | None = None, error: str | None = None) -> str:
+    if status == "created":
+        return '<div class="notice success">Тариф добавлен</div>'
+    if status == "deleted":
+        return '<div class="notice success">Тариф удален</div>'
+    if status == "device_extended":
+        return '<div class="notice success">Подписка продлена вручную</div>'
+    if status == "device_deactivated":
+        return '<div class="notice success">Устройство деактивировано</div>'
+    if status == "user_balance_updated":
+        return '<div class="notice success">Баланс пользователя обновлен</div>'
+    if error == "required":
+        return '<div class="notice error">Заполните название, месяцы и цену</div>'
+    if error == "invalid":
+        return '<div class="notice error">Поля месяцев, цены, трафика и порядка должны быть числами</div>'
+    if error == "not_found":
+        return '<div class="notice error">Тариф не найден</div>'
+    if error == "device_not_found":
+        return '<div class="notice error">Подписка или устройство не найдены</div>'
+    if error == "device_invalid":
+        return '<div class="notice error">Некорректные параметры действия</div>'
+    if error == "user_not_found":
+        return '<div class="notice error">Пользователь не найден</div>'
+    if error == "balance_invalid":
+        return '<div class="notice error">Некорректная сумма или операция с балансом</div>'
+    if error == "server":
+        return '<div class="notice error">Внутренняя ошибка сервера</div>'
+    return ""
+
+
+def _admin_layout(*, title: str, subtitle: str, active_tab: str, content_html: str, notice_html: str = "") -> str:
+    nav_overview_class = "nav-link active" if active_tab == "overview" else "nav-link"
+    nav_tariffs_class = "nav-link active" if active_tab == "tariffs" else "nav-link"
+    nav_payments_class = "nav-link active" if active_tab == "payments" else "nav-link"
+    nav_devices_class = "nav-link active" if active_tab == "devices" else "nav-link"
+    nav_users_class = "nav-link active" if active_tab == "users" else "nav-link"
+    nav_analytics_class = "nav-link active" if active_tab == "analytics" else "nav-link"
+    html = """
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>Админ — Raccaster VPN</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    * { box-sizing: border-box; }
+    :root {
+      --bg: #0b1120;
+      --surface: #111827;
+      --surface-raised: #172033;
+      --surface-soft: #1f2937;
+      --border: #334155;
+      --text: #e5e7eb;
+      --muted: #94a3b8;
+      --accent: #8b5cf6;
+      --accent-soft: rgba(139, 92, 246, 0.16);
+      --accent-2: #38bdf8;
+      --success: #10b981;
+      --danger: #ef4444;
+      --warning: #f59e0b;
+      --shadow: 0 16px 40px rgba(2, 6, 23, 0.28);
+    }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at top, rgba(56, 189, 248, 0.08), transparent 30%),
+        radial-gradient(circle at right top, rgba(139, 92, 246, 0.12), transparent 26%),
+        var(--bg);
+      color: var(--text);
+    }
+    a { color: inherit; }
+    .page {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 24px 16px 40px;
+    }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+    }
+    .topbar-left { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .back-link {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 14px;
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 14px;
+      background: rgba(15, 23, 42, 0.48);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      box-shadow: var(--shadow);
+      font-weight: 700;
+    }
+    .brand-mark {
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      box-shadow: 0 0 20px rgba(139, 92, 246, 0.48);
+    }
+    .nav {
+      display: inline-flex;
+      gap: 8px;
+      padding: 6px;
+      border-radius: 16px;
+      background: rgba(15, 23, 42, 0.58);
+      border: 1px solid rgba(148, 163, 184, 0.12);
+    }
+    .nav-link {
+      text-decoration: none;
+      color: var(--muted);
+      padding: 10px 14px;
+      border-radius: 12px;
+      font-size: 14px;
+      font-weight: 600;
+    }
+    .nav-link.active {
+      color: #fff;
+      background: linear-gradient(135deg, rgba(139, 92, 246, 0.28), rgba(56, 189, 248, 0.2));
+      border: 1px solid rgba(139, 92, 246, 0.3);
+    }
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: 24px;
+      border-radius: 24px;
+      background:
+        radial-gradient(circle at top right, rgba(139, 92, 246, 0.25), transparent 28%),
+        linear-gradient(135deg, #111827, #172033);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      box-shadow: var(--shadow);
+      margin-bottom: 20px;
+    }
+    .hero::after {
+      content: "";
+      position: absolute;
+      right: -60px;
+      top: -60px;
+      width: 220px;
+      height: 220px;
+      border-radius: 999px;
+      background: radial-gradient(circle, rgba(56, 189, 248, 0.2), transparent 68%);
+      pointer-events: none;
+    }
+    .hero-title {
+      position: relative;
+      z-index: 1;
+      font-size: 30px;
+      font-weight: 800;
+      margin-bottom: 10px;
+    }
+    .hero-subtitle {
+      position: relative;
+      z-index: 1;
+      font-size: 15px;
+      line-height: 1.55;
+      color: var(--muted);
+      max-width: 760px;
+    }
+    .notice {
+      border-radius: 16px;
+      padding: 14px 16px;
+      margin-bottom: 18px;
+      border: 1px solid transparent;
+    }
+    .notice.success { background: rgba(16, 185, 129, 0.12); color: #a7f3d0; border-color: rgba(16, 185, 129, 0.26); }
+    .notice.error { background: rgba(239, 68, 68, 0.12); color: #fecaca; border-color: rgba(239, 68, 68, 0.24); }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+    .stat-card, .card {
+      background: linear-gradient(180deg, var(--surface-raised), var(--surface));
+      border: 1px solid rgba(148, 163, 184, 0.12);
+      border-radius: 20px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }
+    .stat-label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .stat-value {
+      font-size: 34px;
+      font-weight: 800;
+      margin-bottom: 6px;
+    }
+    .stat-meta {
+      font-size: 14px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+    .section-grid {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 16px;
+      align-items: start;
+    }
+    .card-title {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .card-subtitle {
+      font-size: 14px;
+      color: var(--muted);
+      line-height: 1.5;
+      margin-bottom: 16px;
+    }
+    .module-list {
+      display: grid;
+      gap: 12px;
+    }
+    .module-item {
+      padding: 16px;
+      border-radius: 18px;
+      background: rgba(15, 23, 42, 0.46);
+      border: 1px solid rgba(148, 163, 184, 0.12);
+    }
+    .module-title {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .module-text {
+      font-size: 14px;
+      color: var(--muted);
+      line-height: 1.5;
+      margin-bottom: 12px;
+    }
+    .btn-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .btn, button {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: var(--surface-soft);
+      color: var(--text);
+      border-radius: 12px;
+      padding: 10px 14px;
+      font-size: 14px;
+      font-weight: 700;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .btn.primary, button.primary {
+      background: linear-gradient(135deg, rgba(139, 92, 246, 0.32), rgba(56, 189, 248, 0.22));
+      border-color: rgba(139, 92, 246, 0.32);
+    }
+    .btn.danger, button.danger {
+      background: rgba(127, 29, 29, 0.38);
+      border-color: rgba(239, 68, 68, 0.3);
+    }
+    .muted-list {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+    .table-wrap {
+      overflow-x: auto;
+      border-radius: 16px;
+      border: 1px solid rgba(148, 163, 184, 0.12);
+      background: rgba(15, 23, 42, 0.36);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 760px;
+    }
+    th, td {
+      padding: 12px 14px;
+      text-align: left;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-weight: 700;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .badge.active { background: rgba(16, 185, 129, 0.14); color: #a7f3d0; }
+    .badge.inactive { background: rgba(148, 163, 184, 0.14); color: #cbd5e1; }
+    .badge.promo { background: rgba(245, 158, 11, 0.14); color: #fde68a; }
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .form-row { margin-bottom: 12px; }
+    .form-row label {
+      display: block;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    input {
+      width: 100%;
+      padding: 11px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(15, 23, 42, 0.58);
+      color: var(--text);
+    }
+    select {
+      width: 100%;
+      padding: 11px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(15, 23, 42, 0.58);
+      color: var(--text);
+    }
+    input::placeholder { color: #64748b; }
+    .inline-form { display: inline; margin: 0; }
+    .toolbar-form {
+      display: grid;
+      grid-template-columns: 1.4fr repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      align-items: end;
+    }
+    .toolbar-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 14px;
+    }
+    .cell-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .mini-form {
+      display: inline-flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin: 0;
+    }
+    .mini-form input {
+      width: 82px;
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+    .mini-form button,
+    .cell-actions .btn {
+      padding: 8px 10px;
+      font-size: 13px;
+      border-radius: 10px;
+    }
+    .empty-state {
+      padding: 18px;
+      border-radius: 16px;
+      background: rgba(15, 23, 42, 0.44);
+      color: var(--muted);
+      border: 1px dashed rgba(148, 163, 184, 0.18);
+    }
+    .bars-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .bar-list {
+      display: grid;
+      gap: 12px;
+    }
+    .bar-item {
+      padding: 14px;
+      border-radius: 16px;
+      background: rgba(15, 23, 42, 0.44);
+      border: 1px solid rgba(148, 163, 184, 0.12);
+    }
+    .bar-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 14px;
+      margin-bottom: 8px;
+    }
+    .bar-label {
+      font-weight: 700;
+      color: var(--text);
+    }
+    .bar-value {
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .bar-track {
+      width: 100%;
+      height: 10px;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.14);
+      overflow: hidden;
+    }
+    .bar-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(135deg, rgba(139, 92, 246, 0.95), rgba(56, 189, 248, 0.95));
+    }
+    @media (max-width: 980px) {
+      .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .section-grid { grid-template-columns: 1fr; }
+      .bars-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 640px) {
+      .page { padding: 18px 12px 32px; }
+      .hero-title { font-size: 24px; }
+      .stats-grid { grid-template-columns: 1fr; }
+      .form-grid { grid-template-columns: 1fr; }
+      .toolbar-form { grid-template-columns: 1fr; }
+      .nav { width: 100%; justify-content: stretch; }
+      .nav-link { flex: 1; text-align: center; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="topbar">
+      <div class="topbar-left">
+        <a href="/" class="back-link">← В приложение</a>
+        <div class="brand"><span class="brand-mark"></span><span>Raccaster VPN Admin</span></div>
+      </div>
+      <nav class="nav">
+        <a href="/admin" class="__NAV_OVERVIEW__">Обзор</a>
+        <a href="/admin/tariffs" class="__NAV_TARIFFS__">Тарифы</a>
+        <a href="/admin/payments" class="__NAV_PAYMENTS__">Платежи</a>
+        <a href="/admin/devices" class="__NAV_DEVICES__">Устройства</a>
+        <a href="/admin/users" class="__NAV_USERS__">Пользователи</a>
+        <a href="/admin/analytics" class="__NAV_ANALYTICS__">Аналитика</a>
+      </nav>
+    </div>
+    <section class="hero">
+      <div class="hero-title">__TITLE__</div>
+      <div class="hero-subtitle">__SUBTITLE__</div>
+    </section>
+    __NOTICE_HTML__
+    __CONTENT_HTML__
+  </div>
+</body>
+</html>
+"""
+    return (
+        html.replace("__TITLE__", escape(title))
+        .replace("__SUBTITLE__", escape(subtitle))
+        .replace("__NOTICE_HTML__", notice_html)
+        .replace("__CONTENT_HTML__", content_html)
+        .replace("__NAV_OVERVIEW__", nav_overview_class)
+        .replace("__NAV_TARIFFS__", nav_tariffs_class)
+        .replace("__NAV_PAYMENTS__", nav_payments_class)
+        .replace("__NAV_DEVICES__", nav_devices_class)
+        .replace("__NAV_USERS__", nav_users_class)
+        .replace("__NAV_ANALYTICS__", nav_analytics_class)
+    )
+
+
+def _admin_home_html(tariffs: List[Dict[str, Any]], metrics: Dict[str, int]) -> str:
+    total = len(tariffs)
+    active = sum(1 for t in tariffs if t.get("is_active"))
+    inactive = total - active
+    with_badges = sum(1 for t in tariffs if (t.get("badge") or "").strip())
+    cheapest = min((int(t.get("price_stars") or 0) for t in tariffs), default=0)
+    highest = max((int(t.get("price_stars") or 0) for t in tariffs), default=0)
+    recent = sorted(tariffs, key=lambda t: int(t.get("sort_order") or 0))[:5]
     rows_html = "".join(
         (
             "<tr>"
+            f"<td>{escape(str(t.get('name') or ''))}</td>"
+            f"<td>{int(t.get('months') or 0)}</td>"
+            f"<td>{int(t.get('price_stars') or 0)} ⭐</td>"
+            f"<td>{int(t.get('traffic_gb') or 0)} GB</td>"
+            f"<td><span class=\"badge {'active' if t.get('is_active') else 'inactive'}\">{'Активен' if t.get('is_active') else 'Выключен'}</span></td>"
+            "</tr>"
+        )
+        for t in recent
+    )
+    if not rows_html:
+        rows_html = '<tr><td colspan="5">Тарифы пока не созданы</td></tr>'
+    content_html = f"""
+    <section class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Пользователи</div>
+        <div class="stat-value">{metrics["users_count"]}</div>
+        <div class="stat-meta">Всего пользователей в базе.</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Активные устройства</div>
+        <div class="stat-value">{metrics["active_subscriptions"]}</div>
+        <div class="stat-meta">Действующие подписки и конфиги.</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Истекают скоро</div>
+        <div class="stat-value">{metrics["expiring_soon"]}</div>
+        <div class="stat-meta">Подписок с окончанием в ближайшие 7 дней.</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Баланс пользователей</div>
+        <div class="stat-value">{metrics["total_balance"]} ⭐</div>
+        <div class="stat-meta">Суммарный Stars-баланс по всем аккаунтам.</div>
+      </div>
+    </section>
+    <section class="section-grid">
+      <div class="card">
+        <div class="card-title">Разделы админки</div>
+        <div class="card-subtitle">Панель разделена на рабочие разделы: тарифы, платежи, устройства, пользователи и аналитика по продукту.</div>
+        <div class="module-list">
+          <div class="module-item">
+            <div class="module-title">Тарифы</div>
+            <div class="module-text">Управление каталогом, ценами, трафиком, бейджами и порядком показа тарифов в WebApp.</div>
+            <div class="btn-row">
+              <a class="btn primary" href="/admin/tariffs">Открыть тарифы</a>
+              <a class="btn" href="/admin/tariffs#tariff-create">Добавить тариф</a>
+            </div>
+          </div>
+          <div class="module-item">
+            <div class="module-title">Платежи</div>
+            <div class="module-text">Просмотр пополнений, покупок, возвратов и ожидающих операций кошелька пользователей.</div>
+            <div class="btn-row">
+              <a class="btn primary" href="/admin/payments">Открыть платежи</a>
+            </div>
+          </div>
+          <div class="module-item">
+            <div class="module-title">Устройства</div>
+            <div class="module-text">Список подписок и устройств пользователей: статус, срок действия, тариф и привязка к аккаунту.</div>
+            <div class="btn-row">
+              <a class="btn primary" href="/admin/devices">Открыть устройства</a>
+            </div>
+          </div>
+          <div class="module-item">
+            <div class="module-title">Пользователи</div>
+            <div class="module-text">База пользователей с поиском, карточкой профиля, балансом, устройствами и историей операций.</div>
+            <div class="btn-row">
+              <a class="btn primary" href="/admin/users">Открыть пользователей</a>
+            </div>
+          </div>
+          <div class="module-item">
+            <div class="module-title">Аналитика</div>
+            <div class="module-text">Рост, выручка в Stars, воронка, топ тарифов и платформ для быстрых продуктовых решений.</div>
+            <div class="btn-row">
+              <a class="btn primary" href="/admin/analytics">Открыть аналитику</a>
+            </div>
+          </div>
+          <div class="module-item">
+            <div class="module-title">Проверка витрины</div>
+            <div class="module-text">Быстрый переход в пользовательский WebApp, чтобы сразу проверить изменения после редактирования панели.</div>
+            <div class="btn-row">
+              <a class="btn" href="/">Открыть приложение</a>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Сводка системы</div>
+        <div class="card-subtitle">Быстрые ориентиры по проекту и тарифной сетке.</div>
+        <ul class="muted-list">
+          <li>Всего тарифов: {total}</li>
+          <li>Активные тарифы: {active}</li>
+          <li>Неактивные тарифы: {inactive}</li>
+          <li>Тарифов с бейджами: {with_badges}</li>
+          <li>Минимальная цена: {cheapest} ⭐</li>
+          <li>Максимальная цена: {highest} ⭐</li>
+          <li>Оплаченных операций: {metrics["paid_transactions"]}</li>
+          <li>Ожидающих пополнений: {metrics["pending_topups"]}</li>
+          <li>Всего пополнено через кошелек: {metrics["topup_volume"]} ⭐</li>
+        </ul>
+      </div>
+    </section>
+    <section class="card" style="margin-top:16px;">
+      <div class="card-title">Быстрый обзор тарифов</div>
+      <div class="card-subtitle">Первые позиции каталога, чтобы быстро оценить сетку без перехода в редактор.</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Название</th>
+              <th>Месяцев</th>
+              <th>Цена</th>
+              <th>Трафик</th>
+              <th>Статус</th>
+            </tr>
+          </thead>
+          <tbody>{rows_html}</tbody>
+        </table>
+      </div>
+    </section>
+    """
+    return _admin_layout(
+        title="Админ-панель",
+        subtitle="Главный обзор проекта, навигация по разделам и быстрые действия для управления каталогом VPN.",
+        active_tab="overview",
+        content_html=content_html,
+    )
+
+
+def _admin_tariffs_html(tariffs: List[Dict[str, Any]], status: str | None = None, error: str | None = None) -> str:
+    def render_tariff_row(t: Dict[str, Any]) -> str:
+        badge_html = f"<span class='badge promo'>{escape(str(t.get('badge') or ''))}</span>" if t.get("badge") else "—"
+        status_class = "active" if t.get("is_active") else "inactive"
+        status_text = "Активен" if t.get("is_active") else "Выключен"
+        return (
+            "<tr>"
             f"<td>{t['id']}</td>"
             f"<td>{escape(str(t.get('name') or ''))}</td>"
-            f"<td>{t['months']}</td>"
-            f"<td>{t['price_stars']}</td>"
-            f"<td>{t['traffic_gb']}</td>"
-            f"<td>{escape(str(t.get('badge') or ''))}</td>"
-            f"<td>{'да' if t.get('is_active') else 'нет'}</td>"
+            f"<td>{int(t.get('months') or 0)}</td>"
+            f"<td>{int(t.get('price_stars') or 0)} ⭐</td>"
+            f"<td>{int(t.get('traffic_gb') or 0)} GB</td>"
+            f"<td>{badge_html}</td>"
+            f"<td><span class=\"badge {status_class}\">{status_text}</span></td>"
             "<td>"
             f"<form method=\"post\" action=\"/admin/tariffs/{t['id']}/delete\" class=\"inline-form\" onsubmit=\"return confirm('Удалить тариф?');\">"
             "<button type=\"submit\" class=\"danger\">Удалить</button>"
@@ -511,94 +1734,827 @@ def _admin_html(tariffs: List[Dict[str, Any]], status: str | None = None, error:
             "</td>"
             "</tr>"
         )
-        for t in tariffs
-    )
+
+    rows_html = "".join(render_tariff_row(t) for t in tariffs)
     if not rows_html:
         rows_html = '<tr><td colspan="8">Нет тарифов</td></tr>'
 
-    notice_html = ""
-    if status == "created":
-        notice_html = '<div class="notice success">Тариф добавлен</div>'
-    elif status == "deleted":
-        notice_html = '<div class="notice success">Тариф удален</div>'
-    elif error == "required":
-        notice_html = '<div class="notice error">Заполните название, месяцы и цену</div>'
-    elif error == "invalid":
-        notice_html = '<div class="notice error">Поля месяцев, цены, трафика и порядка должны быть числами</div>'
-    elif error == "not_found":
-        notice_html = '<div class="notice error">Тариф не найден</div>'
-    elif error == "server":
-        notice_html = '<div class="notice error">Внутренняя ошибка сервера</div>'
-
-    html = """
-<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8" />
-  <title>Админ — raccaster_vpn</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    * { box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f172a; color: #e5e7eb; margin: 0; padding: 16px; }
-    .header { font-size: 20px; font-weight: 700; margin-bottom: 16px; }
-    table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
-    th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #334155; }
-    th { color: #94a3b8; font-weight: 600; font-size: 12px; text-transform: uppercase; }
-    input, button { padding: 8px 12px; border-radius: 8px; border: 1px solid #475569; background: #1e293b; color: #e5e7eb; }
-    button { cursor: pointer; font-size: 13px; }
-    button.danger { background: #7f1d1d; border-color: #991b1b; }
-    button.primary { background: #166534; border-color: #15803d; }
-    .form-row { margin-bottom: 12px; }
-    .form-row label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 4px; }
-    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-    .card { background: #1e293b; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
-    .notice { border-radius: 12px; padding: 12px 14px; margin-bottom: 16px; }
-    .notice.success { background: #052e16; color: #86efac; border: 1px solid #166534; }
-    .notice.error { background: #450a0a; color: #fca5a5; border: 1px solid #991b1b; }
-    .inline-form { display: inline; margin: 0; }
-  </style>
-</head>
-<body>
-  <div class="header" style="display:flex;align-items:center;gap:12px;">
-    <a href="/" style="color:var(--hint,#94a3b8);text-decoration:none;font-size:14px;">← В приложение</a>
-    <span>Админ-панель</span>
-  </div>
-  __NOTICE_HTML__
-  <div id="content">
-    <form class="card" method="post" action="/admin/tariffs/create">
-      <div style="margin-bottom:12px;font-weight:600;">Добавить тариф</div>
-      <div class="form-grid">
-        <div class="form-row"><label>Название</label><input type="text" name="name" placeholder="1 месяц" /></div>
-        <div class="form-row"><label>Месяцев</label><input type="number" name="months" min="1" value="1" /></div>
-        <div class="form-row"><label>Цена (Stars)</label><input type="number" name="price_stars" min="0" value="300" /></div>
-        <div class="form-row"><label>Трафик (GB)</label><input type="number" name="traffic_gb" min="0" value="30" /></div>
-        <div class="form-row"><label>Бейдж</label><input type="text" name="badge" placeholder="-17%" /></div>
-        <div class="form-row"><label>Порядок</label><input type="number" name="sort_order" value="0" /></div>
+    content_html = f"""
+    <section class="section-grid">
+      <form class="card" id="tariff-create" method="post" action="/admin/tariffs/create">
+        <div class="card-title">Добавить тариф</div>
+        <div class="card-subtitle">Создайте новый тариф для витрины WebApp. Сразу укажите цену в Stars, трафик, длительность и порядок показа.</div>
+        <div class="form-grid">
+          <div class="form-row"><label>Название</label><input type="text" name="name" placeholder="1 месяц" /></div>
+          <div class="form-row"><label>Месяцев</label><input type="number" name="months" min="1" value="1" /></div>
+          <div class="form-row"><label>Цена (Stars)</label><input type="number" name="price_stars" min="0" value="300" /></div>
+          <div class="form-row"><label>Трафик (GB)</label><input type="number" name="traffic_gb" min="0" value="30" /></div>
+          <div class="form-row"><label>Бейдж</label><input type="text" name="badge" placeholder="-17%" /></div>
+          <div class="form-row"><label>Порядок</label><input type="number" name="sort_order" value="0" /></div>
+        </div>
+        <div class="btn-row" style="margin-top:8px;">
+          <button type="submit" class="primary">Добавить тариф</button>
+          <a class="btn" href="/admin">Назад в обзор</a>
+        </div>
+      </form>
+      <div class="card">
+        <div class="card-title">Как использовать раздел</div>
+        <div class="card-subtitle">Здесь собран весь текущий рабочий функционал по управлению тарифной сеткой.</div>
+        <ul class="muted-list">
+          <li>Добавляйте новые тарифы через форму слева.</li>
+          <li>Проверяйте итоговую сетку в таблице ниже.</li>
+          <li>Удаляйте устаревшие или тестовые тарифы напрямую из списка.</li>
+          <li>Порядок влияет на расположение тарифов в витрине WebApp.</li>
+        </ul>
       </div>
-      <button type="submit" class="primary">Добавить</button>
-    </form>
-    <div class="card">
-      <div style="margin-bottom:12px;font-weight:600;">Тарифы</div>
-      <table><thead><tr><th>ID</th><th>Название</th><th>Мес</th><th>Stars</th><th>GB</th><th>Бейдж</th><th>Активен</th><th></th></tr></thead><tbody>__ROWS_HTML__</tbody></table>
-    </div>
-  </div>
-</body>
-</html>
-"""
-    return html.replace("__NOTICE_HTML__", notice_html).replace("__ROWS_HTML__", rows_html)
+    </section>
+    <section class="card" style="margin-top:16px;">
+      <div class="card-title">Управление тарифами</div>
+      <div class="card-subtitle">Текущий список тарифов со статусами, бейджами и быстрым удалением.</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Название</th>
+              <th>Месяцев</th>
+              <th>Цена</th>
+              <th>Трафик</th>
+              <th>Бейдж</th>
+              <th>Статус</th>
+              <th>Действие</th>
+            </tr>
+          </thead>
+          <tbody>{rows_html}</tbody>
+        </table>
+      </div>
+    </section>
+    """
+    return _admin_layout(
+        title="Управление тарифами",
+        subtitle="Отдельный раздел для редактирования каталога тарифов. Основная админка теперь работает как dashboard с навигацией и обзором.",
+        active_tab="tariffs",
+        content_html=content_html,
+        notice_html=_admin_notice_html(status=status, error=error),
+    )
+
+
+def _admin_payments_html(data: Dict[str, Any], *, q: str = "", status: str = "", kind: str = "", notice_html: str = "") -> str:
+    stats = data["stats"]
+    rows = data["rows"]
+    q_value = escape(q)
+    status_all = "selected" if not status else ""
+    status_paid = "selected" if status == "paid" else ""
+    status_pending = "selected" if status == "pending" else ""
+    status_cancelled = "selected" if status == "cancelled" else ""
+    kind_all = "selected" if not kind else ""
+    kind_topup = "selected" if kind == "topup" else ""
+    kind_purchase = "selected" if kind == "purchase" else ""
+    kind_refund = "selected" if kind == "refund" else ""
+    rows_html = "".join(
+        (
+            "<tr>"
+            f"<td>{row['id']}</td>"
+            f"<td>{_admin_person_label(row)}<br><span style=\"color:#94a3b8;font-size:12px;\">TG {row['telegram_id']}</span></td>"
+            f"<td>{escape(str(row.get('description') or row.get('kind') or '—'))}</td>"
+            f"<td><span class=\"badge {'active' if row.get('status') == 'paid' else 'inactive'}\">{escape(str(row.get('status') or '—'))}</span></td>"
+            f"<td>{int(row.get('amount') or 0)} ⭐</td>"
+            f"<td>{escape(str(row.get('provider_amount') or '—'))}{(' ' + escape(str(row.get('provider_currency')))) if row.get('provider_currency') else ''}</td>"
+            f"<td>{row['created_at'].strftime('%d.%m.%Y %H:%M') if row.get('created_at') else '—'}</td>"
+            "</tr>"
+        )
+        for row in rows
+    )
+    if not rows_html:
+        rows_html = '<tr><td colspan="7">Операций пока нет</td></tr>'
+    content_html = f"""
+    <section class="card">
+      <div class="card-title">Поиск и фильтры</div>
+      <div class="card-subtitle">Ищите по Telegram ID, username, имени пользователя или описанию операции.</div>
+      <form method="get" action="/admin/payments">
+        <div class="toolbar-form">
+          <div class="form-row"><label>Поиск</label><input type="text" name="q" value="{q_value}" placeholder="123456789, @user, Пополнение" /></div>
+          <div class="form-row"><label>Статус</label><select name="status"><option value="" {status_all}>Все</option><option value="paid" {status_paid}>paid</option><option value="pending" {status_pending}>pending</option><option value="cancelled" {status_cancelled}>cancelled</option></select></div>
+          <div class="form-row"><label>Тип операции</label><select name="kind"><option value="" {kind_all}>Все</option><option value="topup" {kind_topup}>topup</option><option value="purchase" {kind_purchase}>purchase</option><option value="refund" {kind_refund}>refund</option></select></div>
+          <div class="form-row"><label>Действие</label><button type="submit" class="primary">Применить</button></div>
+        </div>
+        <div class="toolbar-actions"><a class="btn" href="/admin/payments">Сбросить фильтры</a></div>
+      </form>
+    </section>
+    <section class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Пополнения</div>
+        <div class="stat-value">{stats["paid_topups"]}</div>
+        <div class="stat-meta">Завершенных пополнений баланса.</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Объем пополнений</div>
+        <div class="stat-value">{stats["topup_volume"]} ⭐</div>
+        <div class="stat-meta">Сумма успешных top-up операций.</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Покупки</div>
+        <div class="stat-value">{stats["purchases_count"]}</div>
+        <div class="stat-meta">Оплаченных списаний за тарифы.</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Ожидают оплаты</div>
+        <div class="stat-value">{stats["pending_topups"]}</div>
+        <div class="stat-meta">Pending-инвойсов пополнения.</div>
+      </div>
+    </section>
+    <section class="section-grid">
+      <div class="card">
+        <div class="card-title">Раздел платежей</div>
+        <div class="card-subtitle">Здесь удобно отслеживать пополнения кошелька, покупки тарифов и возвраты. Это уже не редактор, а реально полезный операционный раздел.</div>
+        <ul class="muted-list">
+          <li>Всего списано на покупки: {stats["purchase_volume"]} ⭐</li>
+          <li>Возвратов проведено: {stats["refunds_count"]}</li>
+          <li>Pending top-up полезен для поиска зависших попыток оплаты</li>
+          <li>Описание операции показывает, за что именно было списание или пополнение</li>
+        </ul>
+      </div>
+      <div class="card">
+        <div class="card-title">Быстрые действия</div>
+        <div class="card-subtitle">Переходы в другие рабочие разделы.</div>
+        <div class="btn-row">
+          <a class="btn" href="/admin">Обзор</a>
+          <a class="btn" href="/admin/tariffs">Тарифы</a>
+          <a class="btn primary" href="/admin/devices">Устройства</a>
+        </div>
+      </div>
+    </section>
+    <section class="card" style="margin-top:16px;">
+      <div class="card-title">Последние операции</div>
+      <div class="card-subtitle">Последние транзакции кошелька по всем пользователям.</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Пользователь</th>
+              <th>Описание</th>
+              <th>Статус</th>
+              <th>Сумма</th>
+              <th>Провайдер</th>
+              <th>Дата</th>
+            </tr>
+          </thead>
+          <tbody>{rows_html}</tbody>
+        </table>
+      </div>
+    </section>
+    """
+    return _admin_layout(
+        title="Платежи и кошелек",
+        subtitle="Операционный раздел для просмотра пополнений, покупок, возвратов и ожидающих платежных попыток.",
+        active_tab="payments",
+        content_html=content_html,
+        notice_html=notice_html,
+    )
+
+
+def _admin_devices_html(data: Dict[str, Any], *, q: str = "", status: str = "", os_name: str = "", redirect_query: str = "", notice_html: str = "") -> str:
+    stats = data["stats"]
+    rows = data["rows"]
+    q_value = escape(q)
+    os_all = "selected" if not os_name else ""
+    os_windows = "selected" if os_name == "Windows" else ""
+    os_ios = "selected" if os_name == "iOS" else ""
+    os_android = "selected" if os_name == "Android" else ""
+    status_all = "selected" if not status else ""
+    status_active = "selected" if status == "active" else ""
+    status_inactive = "selected" if status == "inactive" else ""
+    status_expired = "selected" if status == "expired" else ""
+    status_expiring = "selected" if status == "expiring" else ""
+    rows_html = "".join(
+        _admin_device_row_html(row, redirect_query=redirect_query)
+        for row in rows
+    )
+    if not rows_html:
+        rows_html = '<tr><td colspan="9">Устройств пока нет</td></tr>'
+    content_html = f"""
+    <section class="card">
+      <div class="card-title">Поиск и фильтры</div>
+      <div class="card-subtitle">Ищите по Telegram ID, username, названию конфига и платформе. Можно быстро открыть все устройства конкретного пользователя.</div>
+      <form method="get" action="/admin/devices">
+        <div class="toolbar-form">
+          <div class="form-row"><label>Поиск</label><input type="text" name="q" value="{q_value}" placeholder="123456789, @user, iOS 2" /></div>
+          <div class="form-row"><label>Статус</label><select name="status"><option value="" {status_all}>Все</option><option value="active" {status_active}>Активные</option><option value="inactive" {status_inactive}>Неактивные</option><option value="expired" {status_expired}>Истекшие</option><option value="expiring" {status_expiring}>Истекают скоро</option></select></div>
+          <div class="form-row"><label>Платформа</label><select name="os"><option value="" {os_all}>Все</option><option value="Windows" {os_windows}>Windows</option><option value="iOS" {os_ios}>iOS</option><option value="Android" {os_android}>Android</option></select></div>
+          <div class="form-row"><label>Действие</label><button type="submit" class="primary">Применить</button></div>
+        </div>
+        <div class="toolbar-actions"><a class="btn" href="/admin/devices">Сбросить фильтры</a></div>
+      </form>
+    </section>
+    <section class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Всего устройств</div>
+        <div class="stat-value">{stats["total_devices"]}</div>
+        <div class="stat-meta">Все записи подписок и конфигов.</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Активные</div>
+        <div class="stat-value">{stats["active_devices"]}</div>
+        <div class="stat-meta">Рабочие подписки с неистекшим сроком.</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Истекают скоро</div>
+        <div class="stat-value">{stats["expiring_soon"]}</div>
+        <div class="stat-meta">Истечение в ближайшие 7 дней.</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Пользователи с устройствами</div>
+        <div class="stat-value">{stats["users_with_devices"]}</div>
+        <div class="stat-meta">Сколько пользователей имеют хотя бы одно устройство.</div>
+      </div>
+    </section>
+    <section class="section-grid">
+      <div class="card">
+        <div class="card-title">Раздел устройств</div>
+        <div class="card-subtitle">Позволяет быстро увидеть, кто и какие конфиги создал, на какую платформу и с каким сроком действия.</div>
+        <ul class="muted-list">
+          <li>Выключенные вручную записи: {stats["disabled_devices"]}</li>
+          <li>Истекших подписок: {stats["expired_devices"]}</li>
+          <li>Список сортируется по дате создания, сверху самые свежие устройства</li>
+          <li>Можно использовать как основу для будущих действий: блокировка, ручное продление, поиск пользователя</li>
+        </ul>
+      </div>
+      <div class="card">
+        <div class="card-title">Быстрые действия</div>
+        <div class="card-subtitle">Смежные разделы для операционной работы.</div>
+        <div class="btn-row">
+          <a class="btn" href="/admin">Обзор</a>
+          <a class="btn" href="/admin/tariffs">Тарифы</a>
+          <a class="btn primary" href="/admin/payments">Платежи</a>
+        </div>
+      </div>
+    </section>
+    <section class="card" style="margin-top:16px;">
+      <div class="card-title">Последние устройства и подписки</div>
+      <div class="card-subtitle">Свежие конфиги пользователей с платформой, тарифом и сроком действия.</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Пользователь</th>
+              <th>Платформа</th>
+              <th>Название</th>
+              <th>Цена</th>
+              <th>Трафик</th>
+              <th>Действует до</th>
+              <th>Статус</th>
+              <th>Действия</th>
+            </tr>
+          </thead>
+          <tbody>{rows_html}</tbody>
+        </table>
+      </div>
+    </section>
+    """
+    return _admin_layout(
+        title="Устройства и подписки",
+        subtitle="Операционный список конфигов пользователей: статус, срок действия, платформа и привязка к аккаунту.",
+        active_tab="devices",
+        content_html=content_html,
+        notice_html=notice_html,
+    )
+
+
+def _admin_users_html(data: Dict[str, Any], *, q: str = "", segment: str = "", notice_html: str = "") -> str:
+    stats = data["stats"]
+    rows = data["rows"]
+    q_value = escape(q)
+    seg_all = "selected" if not segment else ""
+    seg_balance = "selected" if segment == "with_balance" else ""
+    seg_devices = "selected" if segment == "with_devices" else ""
+    seg_payments = "selected" if segment == "with_payments" else ""
+    rows_html = "".join(
+        (
+            "<tr>"
+            f"<td>{row['id']}</td>"
+            f"<td>{_admin_person_label(row)}<br><span style=\"color:#94a3b8;font-size:12px;\">TG {row['telegram_id']}</span></td>"
+            f"<td>{int(row.get('vpn_balance_stars') or 0)} ⭐</td>"
+            f"<td>{int(row.get('active_devices') or 0)} / {int(row.get('total_devices') or 0)}</td>"
+            f"<td>{int(row.get('total_transactions') or 0)}</td>"
+            f"<td>{row['last_transaction_at'].strftime('%d.%m.%Y %H:%M') if row.get('last_transaction_at') else '—'}</td>"
+            "<td><div class=\"cell-actions\">"
+            f"<a class=\"btn primary\" href=\"/admin/users/{row['id']}\">Профиль</a>"
+            f"<a class=\"btn\" href=\"/admin/devices?q={row['telegram_id']}\">Устройства</a>"
+            f"<a class=\"btn\" href=\"/admin/payments?q={row['telegram_id']}\">Платежи</a>"
+            "</div></td>"
+            "</tr>"
+        )
+        for row in rows
+    )
+    if not rows_html:
+        rows_html = '<tr><td colspan="7">Пользователи не найдены</td></tr>'
+    content_html = f"""
+    <section class="card">
+      <div class="card-title">Поиск и фильтры</div>
+      <div class="card-subtitle">Ищите по Telegram ID, username, имени или фамилии пользователя.</div>
+      <form method="get" action="/admin/users">
+        <div class="toolbar-form">
+          <div class="form-row"><label>Поиск</label><input type="text" name="q" value="{q_value}" placeholder="123456789, @user, Иван" /></div>
+          <div class="form-row"><label>Сегмент</label><select name="segment"><option value="" {seg_all}>Все</option><option value="with_balance" {seg_balance}>С балансом</option><option value="with_devices" {seg_devices}>С устройствами</option><option value="with_payments" {seg_payments}>С операциями</option></select></div>
+          <div class="form-row"><label>Действие</label><button type="submit" class="primary">Применить</button></div>
+          <div class="form-row"><label>Сброс</label><a class="btn" href="/admin/users">Сбросить</a></div>
+        </div>
+      </form>
+    </section>
+    <section class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Всего пользователей</div>
+        <div class="stat-value">{stats["total_users"]}</div>
+        <div class="stat-meta">Аккаунтов в базе данных.</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">С балансом</div>
+        <div class="stat-value">{stats["users_with_balance"]}</div>
+        <div class="stat-meta">Пользователей с положительным Stars-балансом.</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Суммарный баланс</div>
+        <div class="stat-value">{stats["total_balance"]} ⭐</div>
+        <div class="stat-meta">Общий баланс всех пользователей.</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Переход</div>
+        <div class="stat-value">Profile</div>
+        <div class="stat-meta">Откройте профиль пользователя для деталей и быстрых действий.</div>
+      </div>
+    </section>
+    <section class="card">
+      <div class="card-title">Пользователи</div>
+      <div class="card-subtitle">Список аккаунтов с балансом, количеством устройств и операций.</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Пользователь</th>
+              <th>Баланс</th>
+              <th>Устройства</th>
+              <th>Операции</th>
+              <th>Последняя активность</th>
+              <th>Действия</th>
+            </tr>
+          </thead>
+          <tbody>{rows_html}</tbody>
+        </table>
+      </div>
+    </section>
+    """
+    return _admin_layout(
+        title="Пользователи",
+        subtitle="Раздел для управления аккаунтами: баланс, устройства, платежи и быстрый переход в карточку пользователя.",
+        active_tab="users",
+        content_html=content_html,
+        notice_html=notice_html,
+    )
+
+
+def _admin_user_profile_html(profile: Dict[str, Any], *, notice_html: str = "") -> str:
+    user = profile["user"]
+    device_stats = profile["device_stats"]
+    tx_stats = profile["tx_stats"]
+    devices = profile["devices"]
+    transactions = profile["transactions"]
+    device_rows_html = "".join(
+        (
+            "<tr>"
+            f"<td>{row['id']}</td>"
+            f"<td>{escape(str(row.get('device_os') or '—'))}</td>"
+            f"<td>{escape(str(row.get('server_label') or '—'))}</td>"
+            f"<td>{int(row.get('price_stars') or 0)} ⭐</td>"
+            f"<td>{int(row.get('traffic_gb') or 0)} GB</td>"
+            f"<td>{row['expires_at'].strftime('%d.%m.%Y') if row.get('expires_at') else '—'}</td>"
+            f"<td><a class=\"btn\" href=\"/admin/devices?q={user['telegram_id']}\">Открыть в устройствах</a></td>"
+            "</tr>"
+        )
+        for row in devices
+    ) or '<tr><td colspan="7">У пользователя пока нет устройств</td></tr>'
+    tx_rows_html = "".join(
+        (
+            "<tr>"
+            f"<td>{row['id']}</td>"
+            f"<td>{escape(str(row.get('description') or row.get('kind') or '—'))}</td>"
+            f"<td><span class=\"badge {'active' if row.get('status') == 'paid' else 'inactive'}\">{escape(str(row.get('status') or '—'))}</span></td>"
+            f"<td>{int(row.get('amount') or 0)} ⭐</td>"
+            f"<td>{escape(str(row.get('provider_amount') or '—'))}{(' ' + escape(str(row.get('provider_currency')))) if row.get('provider_currency') else ''}</td>"
+            f"<td>{row['created_at'].strftime('%d.%m.%Y %H:%M') if row.get('created_at') else '—'}</td>"
+            "</tr>"
+        )
+        for row in transactions
+    ) or '<tr><td colspan="6">Операций пока нет</td></tr>'
+    content_html = f"""
+    <section class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Пользователь</div>
+        <div class="stat-value">{_admin_person_label(user)}</div>
+        <div class="stat-meta">Telegram ID: {user["telegram_id"]}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Баланс</div>
+        <div class="stat-value">{int(user.get("vpn_balance_stars") or 0)} ⭐</div>
+        <div class="stat-meta">Текущий Stars-баланс пользователя.</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Устройства</div>
+        <div class="stat-value">{device_stats["active_devices"]} / {device_stats["total_devices"]}</div>
+        <div class="stat-meta">Активные и всего устройства пользователя.</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Операции</div>
+        <div class="stat-value">{tx_stats["total_transactions"]}</div>
+        <div class="stat-meta">Доход: {tx_stats["total_income"]} ⭐, списания: {tx_stats["total_outcome"]} ⭐</div>
+      </div>
+    </section>
+    <section class="section-grid">
+      <div class="card">
+        <div class="card-title">Быстрые действия</div>
+        <div class="card-subtitle">Переходы в связанные разделы и ручная корректировка баланса пользователя.</div>
+        <div class="btn-row" style="margin-bottom:14px;">
+          <a class="btn" href="/admin/users">Все пользователи</a>
+          <a class="btn" href="/admin/devices?q={user["telegram_id"]}">Все устройства пользователя</a>
+          <a class="btn" href="/admin/payments?q={user["telegram_id"]}">Все платежи пользователя</a>
+        </div>
+        <form method="post" action="/admin/users/{user["id"]}/balance">
+          <div class="form-grid">
+            <div class="form-row"><label>Тип операции</label><select name="mode"><option value="credit">Начислить</option><option value="debit">Списать</option></select></div>
+            <div class="form-row"><label>Сумма (Stars)</label><input type="number" name="amount" min="1" value="10" /></div>
+            <div class="form-row" style="grid-column: span 2;"><label>Описание</label><input type="text" name="description" placeholder="Ручная корректировка администратором" /></div>
+          </div>
+          <div class="btn-row" style="margin-top:8px;">
+            <button type="submit" class="primary">Применить</button>
+          </div>
+        </form>
+      </div>
+      <div class="card">
+        <div class="card-title">Профиль пользователя</div>
+        <div class="card-subtitle">Краткая информация об аккаунте.</div>
+        <ul class="muted-list">
+          <li>ID пользователя в базе: {user["id"]}</li>
+          <li>Telegram ID: {user["telegram_id"]}</li>
+          <li>Username: {'@' + escape(str(user["username"])) if user.get("username") else '—'}</li>
+          <li>Дата регистрации: {user["created_at"].strftime('%d.%m.%Y %H:%M') if user.get("created_at") else '—'}</li>
+        </ul>
+      </div>
+    </section>
+    <section class="card" style="margin-top:16px;">
+      <div class="card-title">Последние устройства пользователя</div>
+      <div class="card-subtitle">Последние созданные конфиги и подписки этого аккаунта.</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Платформа</th>
+              <th>Название</th>
+              <th>Цена</th>
+              <th>Трафик</th>
+              <th>Действует до</th>
+              <th>Действие</th>
+            </tr>
+          </thead>
+          <tbody>{device_rows_html}</tbody>
+        </table>
+      </div>
+    </section>
+    <section class="card" style="margin-top:16px;">
+      <div class="card-title">Последние операции пользователя</div>
+      <div class="card-subtitle">История операций кошелька и ручных корректировок.</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Описание</th>
+              <th>Статус</th>
+              <th>Сумма</th>
+              <th>Провайдер</th>
+              <th>Дата</th>
+            </tr>
+          </thead>
+          <tbody>{tx_rows_html}</tbody>
+        </table>
+      </div>
+    </section>
+    """
+    return _admin_layout(
+        title="Профиль пользователя",
+        subtitle="Карточка пользователя с балансом, устройствами, операциями и быстрыми действиями администратора.",
+        active_tab="users",
+        content_html=content_html,
+        notice_html=notice_html,
+    )
+
+
+def _admin_bar_list_html(items: List[Dict[str, Any]], suffix: str = "") -> str:
+    if not items:
+        return '<div class="empty-state">Пока недостаточно данных для отображения.</div>'
+    max_value = max((int(item.get("value") or 0) for item in items), default=1) or 1
+    return "".join(
+        (
+            '<div class="bar-item">'
+            f'<div class="bar-top"><span class="bar-label">{escape(str(item.get("label") or "—"))}</span>'
+            f'<span class="bar-value">{int(item.get("value") or 0)}{suffix}</span></div>'
+            f'<div class="bar-track"><div class="bar-fill" style="width:{0 if int(item.get("value") or 0) <= 0 else max(8, round((int(item.get("value") or 0) / max_value) * 100))}%;"></div></div>'
+            '</div>'
+        )
+        for item in items
+    )
+
+
+def _admin_analytics_html(data: Dict[str, Any]) -> str:
+    core = data["core"]
+    days = int(data.get("days") or 14)
+    total_users = max(core["total_users"], 1)
+    paying_rate = round((core["paying_users"] / total_users) * 100)
+    buying_rate = round((core["buying_users"] / total_users) * 100)
+    active_rate = round((core["active_users"] / total_users) * 100)
+    trend_rows_html = "".join(
+        (
+            "<tr>"
+            f"<td>{escape(row['label'])}</td>"
+            f"<td>{int(row['users'])}</td>"
+            f"<td>{int(row['topups'])} ⭐</td>"
+            "</tr>"
+        )
+        for row in data["trend"]
+    ) or '<tr><td colspan="3">Нет данных</td></tr>'
+    funnel_items = [
+        {"label": "Пользователи", "value": core["total_users"]},
+        {"label": "Пополняли баланс", "value": core["paying_users"]},
+        {"label": "Покупали тариф", "value": core["buying_users"]},
+        {"label": "Имеют активное устройство", "value": core["active_users"]},
+    ]
+    period_actions_html = "".join(
+        f'<a class="btn{" primary" if value == days else ""}" href="/admin/analytics?days={value}">{value} дней</a>'
+        for value in (7, 14, 30)
+    )
+    content_html = f"""
+    <section class="card" style="margin-bottom:16px;">
+      <div class="card-title">Период аналитики</div>
+      <div class="card-subtitle">Быстрый переключатель окна наблюдения для трендов и роста.</div>
+      <div class="toolbar-actions">{period_actions_html}</div>
+    </section>
+    <section class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Выручка пополнений</div>
+        <div class="stat-value">{core["total_topups"]} ⭐</div>
+        <div class="stat-meta">Все успешные пополнения кошелька за всё время.</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Покупки тарифов</div>
+        <div class="stat-value">{core["total_purchases"]} ⭐</div>
+        <div class="stat-meta">Суммарные списания на тарифы.</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Рост за {days} дней</div>
+        <div class="stat-value">+{core["new_users_period"]}</div>
+        <div class="stat-meta">Новых пользователей и +{core["new_devices_period"]} новых устройств.</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Конверсия в активных</div>
+        <div class="stat-value">{active_rate}%</div>
+        <div class="stat-meta">Доля пользователей с активными устройствами.</div>
+      </div>
+    </section>
+    <section class="section-grid">
+      <div class="card">
+        <div class="card-title">Воронка продукта</div>
+        <div class="card-subtitle">Простая operational-воронка: от регистрации к активному устройству.</div>
+        <div class="bar-list">{_admin_bar_list_html(funnel_items)}</div>
+        <div class="bars-grid">
+          <div class="module-item">
+            <div class="module-title">Paying Rate</div>
+            <div class="module-text">{paying_rate}% пользователей хотя бы раз пополняли баланс.</div>
+          </div>
+          <div class="module-item">
+            <div class="module-title">Buying Rate</div>
+            <div class="module-text">{buying_rate}% пользователей хотя бы раз покупали тариф.</div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Ключевые выводы</div>
+        <div class="card-subtitle">Быстрые ориентиры для управленческих решений.</div>
+        <ul class="muted-list">
+          <li>Всего пользователей: {core["total_users"]}</li>
+          <li>Платящих пользователей: {core["paying_users"]}</li>
+          <li>Покупающих пользователей: {core["buying_users"]}</li>
+          <li>Пользователей с активным устройством: {core["active_users"]}</li>
+          <li>Суммарно создано устройств: {core["total_devices"]}</li>
+        </ul>
+      </div>
+    </section>
+    <section class="bars-grid">
+      <div class="card">
+        <div class="card-title">Топ тарифов</div>
+        <div class="card-subtitle">Какие тарифы чаще всего покупают и создают как подписки.</div>
+        <div class="bar-list">{_admin_bar_list_html(data["top_tariffs"], " шт.")}</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Топ платформ</div>
+        <div class="card-subtitle">На каких устройствах пользователи чаще всего подключают VPN.</div>
+        <div class="bar-list">{_admin_bar_list_html(data["top_platforms"], " шт.")}</div>
+      </div>
+    </section>
+    <section class="card" style="margin-top:16px;">
+      <div class="card-title">Динамика за последние {days} дней</div>
+      <div class="card-subtitle">Новые пользователи и объем успешных пополнений по дням.</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>День</th>
+              <th>Новые пользователи</th>
+              <th>Пополнения</th>
+            </tr>
+          </thead>
+          <tbody>{trend_rows_html}</tbody>
+        </table>
+      </div>
+    </section>
+    """
+    return _admin_layout(
+        title="Аналитика",
+        subtitle="Сводка по росту продукта, выручке в Stars, воронке и структуре спроса по тарифам и платформам.",
+        active_tab="analytics",
+        content_html=content_html,
+    )
 
 
 async def handle_admin_index(request: web.Request) -> web.Response:
-    """Страница админки: полностью серверный рендер без JS-зависимости."""
+    """Главная страница админки: overview и навигация по разделам."""
+    tariffs = await get_tariffs(active_only=False)
+    metrics = await _admin_fetch_overview_metrics()
+    return web.Response(
+        text=_admin_home_html(tariffs=tariffs, metrics=metrics),
+        content_type="text/html",
+    )
+
+
+async def handle_admin_tariffs_index(request: web.Request) -> web.Response:
+    """Раздел управления тарифами: отдельная страница внутри админки."""
     tariffs = await get_tariffs(active_only=False)
     return web.Response(
-        text=_admin_html(
+        text=_admin_tariffs_html(
             tariffs=tariffs,
             status=request.query.get("status"),
             error=request.query.get("error"),
         ),
         content_type="text/html",
     )
+
+
+async def handle_admin_payments_index(request: web.Request) -> web.Response:
+    """Раздел админки с платежами и операциями кошелька."""
+    q = (request.query.get("q") or "").strip()
+    status = (request.query.get("status") or "").strip()
+    kind = (request.query.get("kind") or "").strip()
+    return web.Response(
+        text=_admin_payments_html(
+            await _admin_fetch_payments_data(q=q, status=status, kind=kind),
+            q=q,
+            status=status,
+            kind=kind,
+            notice_html=_admin_notice_html(status=request.query.get("status"), error=request.query.get("error")),
+        ),
+        content_type="text/html",
+    )
+
+
+async def handle_admin_devices_index(request: web.Request) -> web.Response:
+    """Раздел админки с устройствами и подписками пользователей."""
+    q = (request.query.get("q") or "").strip()
+    status = (request.query.get("status") or "").strip()
+    os_name = (request.query.get("os") or "").strip()
+    return web.Response(
+        text=_admin_devices_html(
+            await _admin_fetch_devices_data(q=q, status=status, os_name=os_name),
+            q=q,
+            status=status,
+            os_name=os_name,
+            redirect_query=request.query_string,
+            notice_html=_admin_notice_html(status=request.query.get("status"), error=request.query.get("error")),
+        ),
+        content_type="text/html",
+    )
+
+
+async def handle_admin_users_index(request: web.Request) -> web.Response:
+    """Раздел админки со списком пользователей."""
+    q = (request.query.get("q") or "").strip()
+    segment = (request.query.get("segment") or "").strip()
+    return web.Response(
+        text=_admin_users_html(
+            await _admin_fetch_users_data(q=q, segment=segment),
+            q=q,
+            segment=segment,
+            notice_html=_admin_notice_html(status=request.query.get("status"), error=request.query.get("error")),
+        ),
+        content_type="text/html",
+    )
+
+
+async def handle_admin_analytics_index(request: web.Request) -> web.Response:
+    """Раздел админки с аналитикой продукта и монетизации."""
+    days_raw = (request.query.get("days") or "14").strip()
+    try:
+        days = int(days_raw)
+    except ValueError:
+        days = 14
+    days = max(7, min(days, 90))
+    return web.Response(
+        text=_admin_analytics_html(await _admin_fetch_analytics_data(days=days)),
+        content_type="text/html",
+    )
+
+
+async def handle_admin_user_profile(request: web.Request) -> web.Response:
+    """Профиль конкретного пользователя для админки."""
+    try:
+        user_id = int(request.match_info["id"])
+    except (KeyError, TypeError, ValueError):
+        raise web.HTTPSeeOther("/admin/users?error=user_not_found")
+    profile = await _admin_fetch_user_profile(user_id)
+    if not profile:
+        raise web.HTTPSeeOther("/admin/users?error=user_not_found")
+    return web.Response(
+        text=_admin_user_profile_html(
+            profile,
+            notice_html=_admin_notice_html(status=request.query.get("status"), error=request.query.get("error")),
+        ),
+        content_type="text/html",
+    )
+
+
+async def handle_admin_user_balance_adjust(request: web.Request) -> web.Response:
+    try:
+        user_id = int(request.match_info["id"])
+    except (KeyError, TypeError, ValueError):
+        raise web.HTTPSeeOther("/admin/users?error=user_not_found")
+    data = await request.post()
+    try:
+        amount = int(data.get("amount") or 0)
+    except ValueError:
+        amount = 0
+    mode = (data.get("mode") or "credit").strip()
+    description = (data.get("description") or "").strip() or "Ручная корректировка администратором"
+    if amount <= 0 or mode not in {"credit", "debit"}:
+        raise web.HTTPSeeOther(f"/admin/users/{user_id}?error=balance_invalid")
+    delta = amount if mode == "credit" else -amount
+    ok = await _admin_adjust_user_balance(user_id=user_id, delta=delta, description=description)
+    if not ok:
+        raise web.HTTPSeeOther(f"/admin/users/{user_id}?error=balance_invalid")
+    raise web.HTTPSeeOther(f"/admin/users/{user_id}?status=user_balance_updated")
+
+
+async def handle_admin_device_extend(request: web.Request) -> web.Response:
+    try:
+        subscription_id = int(request.match_info["id"])
+    except (KeyError, TypeError, ValueError):
+        raise web.HTTPSeeOther("/admin/devices?error=device_not_found")
+    data = await request.post()
+    redirect = (data.get("redirect") or "").strip()
+    base = "/admin/devices" + (f"?{redirect}" if redirect else "")
+    try:
+        days = int(data.get("days") or 30)
+    except ValueError:
+        raise web.HTTPSeeOther(base + ("&" if redirect else "?") + "error=device_invalid")
+    if days <= 0:
+        raise web.HTTPSeeOther(base + ("&" if redirect else "?") + "error=device_invalid")
+    try:
+        ok = await _admin_extend_subscription_manual(
+            subscription_id=subscription_id,
+            days=days,
+            threexui=request.app["threexui"],
+        )
+    except Exception:
+        ok = False
+    if not ok:
+        raise web.HTTPSeeOther(base + ("&" if redirect else "?") + "error=server")
+    raise web.HTTPSeeOther(base + ("&" if redirect else "?") + "status=device_extended")
+
+
+async def handle_admin_device_deactivate(request: web.Request) -> web.Response:
+    try:
+        subscription_id = int(request.match_info["id"])
+    except (KeyError, TypeError, ValueError):
+        raise web.HTTPSeeOther("/admin/devices?error=device_not_found")
+    data = await request.post()
+    redirect = (data.get("redirect") or "").strip()
+    base = "/admin/devices" + (f"?{redirect}" if redirect else "")
+    try:
+        ok = await _admin_deactivate_subscription(subscription_id)
+    except Exception:
+        ok = False
+    if not ok:
+        raise web.HTTPSeeOther(base + ("&" if redirect else "?") + "error=server")
+    raise web.HTTPSeeOther(base + ("&" if redirect else "?") + "status=device_deactivated")
 
 
 async def handle_admin_page_tariffs_create(request: web.Request) -> web.Response:
@@ -608,7 +2564,7 @@ async def handle_admin_page_tariffs_create(request: web.Request) -> web.Response
     months = data.get("months")
     price_stars = data.get("price_stars")
     if not name or months is None or price_stars is None:
-        raise web.HTTPSeeOther("/admin?error=required")
+        raise web.HTTPSeeOther("/admin/tariffs?error=required")
     try:
         traffic_gb = int(data.get("traffic_gb") or 0)
         sort_order = int(data.get("sort_order") or 0)
@@ -621,10 +2577,10 @@ async def handle_admin_page_tariffs_create(request: web.Request) -> web.Response
             sort_order=sort_order,
         )
     except ValueError:
-        raise web.HTTPSeeOther("/admin?error=invalid")
+        raise web.HTTPSeeOther("/admin/tariffs?error=invalid")
     except Exception:
-        raise web.HTTPSeeOther("/admin?error=server")
-    raise web.HTTPSeeOther("/admin?status=created")
+        raise web.HTTPSeeOther("/admin/tariffs?error=server")
+    raise web.HTTPSeeOther("/admin/tariffs?status=created")
 
 
 async def handle_admin_page_tariffs_delete(request: web.Request) -> web.Response:
@@ -632,14 +2588,14 @@ async def handle_admin_page_tariffs_delete(request: web.Request) -> web.Response
     try:
         tariff_id = int(request.match_info["id"])
     except (KeyError, TypeError, ValueError):
-        raise web.HTTPSeeOther("/admin?error=not_found")
+        raise web.HTTPSeeOther("/admin/tariffs?error=not_found")
     try:
         deleted = await delete_tariff(tariff_id)
     except Exception:
-        raise web.HTTPSeeOther("/admin?error=server")
+        raise web.HTTPSeeOther("/admin/tariffs?error=server")
     if not deleted:
-        raise web.HTTPSeeOther("/admin?error=not_found")
-    raise web.HTTPSeeOther("/admin?status=deleted")
+        raise web.HTTPSeeOther("/admin/tariffs?error=not_found")
+    raise web.HTTPSeeOther("/admin/tariffs?status=deleted")
 
 
 async def handle_index(request: web.Request) -> web.Response:
@@ -1033,6 +2989,11 @@ async def handle_index(request: web.Request) -> web.Response:
     .device-app-label { font-size: 12px; color: var(--hint, #94a3b8); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
     .device-app-name { font-size: 18px; font-weight: 800; margin-bottom: 4px; }
     .device-app-text { font-size: 14px; color: var(--hint, #94a3b8); line-height: 1.45; }
+    .device-app-actions {
+      display: grid;
+      gap: 10px;
+      min-width: 200px;
+    }
     .device-app-action {
       width: auto;
       min-width: 176px;
@@ -1147,6 +3108,10 @@ async def handle_index(request: web.Request) -> web.Response:
       .device-app-card {
         flex-direction: column;
         align-items: stretch;
+      }
+      .device-app-actions {
+        width: 100%;
+        min-width: 0;
       }
       .device-app-action {
         width: 100%;
@@ -1272,7 +3237,7 @@ async def handle_index(request: web.Request) -> web.Response:
           <div class="device-app-name" id="device-app-name">VPN client</div>
           <div class="device-app-text" id="device-app-text">Установите приложение и импортируйте ключ в пару касаний.</div>
         </div>
-        <button type="button" class="primary-action device-app-action" id="device-app-action">Открыть</button>
+        <div class="device-app-actions" id="device-app-actions"></div>
       </div>
       <div class="device-summary" id="device-detail-summary"></div>
       <div class="setup-steps" id="device-detail-steps"></div>
@@ -1537,6 +3502,9 @@ async def handle_index(request: web.Request) -> web.Response:
         appName: "Hiddify Next",
         actionLabel: "Открыть загрузки Hiddify",
         actionUrl: "https://github.com/hiddify/hiddify-next/releases",
+        links: [
+          { label: "Открыть загрузки Hiddify", url: "https://github.com/hiddify/hiddify-next/releases", kind: "primary" }
+        ],
         steps: [
           { title: "Скачайте клиент", text: "Откройте страницу загрузки и установите Hiddify Next для Windows." },
           { title: "Скопируйте ключ", text: "Скопируйте ключ подключения ниже в один тап." },
@@ -1546,10 +3514,14 @@ async def handle_index(request: web.Request) -> web.Response:
       },
       "Android": {
         appName: "Hiddify Next",
-        actionLabel: "Открыть загрузки Hiddify",
-        actionUrl: "https://github.com/hiddify/hiddify-next/releases",
+        actionLabel: "Открыть Google Play",
+        actionUrl: "https://play.google.com/store/apps/details?id=app.hiddify.com&hl=ru",
+        links: [
+          { label: "Открыть Google Play", url: "https://play.google.com/store/apps/details?id=app.hiddify.com&hl=ru", kind: "primary" },
+          { label: "Скачать APK / Releases", url: "https://github.com/hiddify/hiddify-next/releases", kind: "secondary" }
+        ],
         steps: [
-          { title: "Скачайте клиент", text: "Установите Hiddify Next для Android с официальной страницы загрузки." },
+          { title: "Скачайте клиент", text: "Установите Hiddify Next из Google Play или через страницу релизов, если это удобнее." },
           { title: "Скопируйте ключ", text: "Скопируйте ключ подключения ниже." },
           { title: "Добавьте профиль", text: "Откройте приложение и импортируйте конфигурацию из буфера обмена." },
           { title: "Подключитесь", text: "Разрешите создание VPN-подключения и включите профиль." }
@@ -1558,7 +3530,10 @@ async def handle_index(request: web.Request) -> web.Response:
       "iOS": {
         appName: "v2RayTun",
         actionLabel: "Открыть App Store",
-        actionUrl: "https://apps.apple.com/us/search?term=v2RayTun",
+        actionUrl: "https://apps.apple.com/ru/app/v2raytun/id6476628951",
+        links: [
+          { label: "Открыть App Store", url: "https://apps.apple.com/ru/app/v2raytun/id6476628951", kind: "primary" }
+        ],
         steps: [
           { title: "Установите приложение", text: "Откройте App Store и установите v2RayTun или другой совместимый клиент." },
           { title: "Скопируйте ключ", text: "Скопируйте ваш ключ подключения ниже." },
@@ -1573,6 +3548,7 @@ async def handle_index(request: web.Request) -> web.Response:
         appName: "совместимый VPN-клиент",
         actionLabel: "",
         actionUrl: "",
+        links: [],
         steps: [
           { title: "Установите приложение", text: "Используйте совместимый клиент для вашего устройства." },
           { title: "Скопируйте ключ", text: "Скопируйте ключ подключения ниже." },
@@ -1628,10 +3604,11 @@ async def handle_index(request: web.Request) -> web.Response:
         '<div class="device-summary-row"><span class="device-summary-label">Действует до</span><span class="device-summary-value">' + escapeHtml(formatDateRu(config.expires_at)) + '</span></div>',
         '<div class="device-summary-row"><span class="device-summary-label">Осталось трафика</span><span class="device-summary-value">' + escapeHtml(config.traffic_value || "Неизвестно") + '</span></div>'
       ].join("");
+      var guideLinks = Array.isArray(guide.links) && guide.links.length ? guide.links : (guide.actionUrl ? [{ label: guide.actionLabel || "Открыть", url: guide.actionUrl, kind: "primary" }] : []);
       var stepsHtml = guide.steps.map(function(step, idx) {
         var actionHtml = "";
-        if (idx === 0 && guide.actionLabel && guide.actionUrl) {
-          actionHtml = '<div class="setup-step-action"><button type="button" class="device-detail-btn device-guide-link" data-url="' + escapeHtml(guide.actionUrl) + '">' + escapeHtml(guide.actionLabel) + '</button></div>';
+        if (idx === 0 && guideLinks.length > 0) {
+          actionHtml = '<div class="setup-step-action"><button type="button" class="device-detail-btn device-guide-link" data-url="' + escapeHtml(guideLinks[0].url) + '">' + escapeHtml(guideLinks[0].label) + '</button></div>';
         }
         return '<div class="setup-step">' +
           '<div class="setup-step-index">' + (idx + 1) + '</div>' +
@@ -1646,13 +3623,13 @@ async def handle_index(request: web.Request) -> web.Response:
       document.getElementById("device-detail-platform-icon").innerHTML = getPlatformIcon(config.device_os);
       document.getElementById("device-app-icon").innerHTML = getPlatformIcon(config.device_os);
       document.getElementById("device-app-name").textContent = guide.appName;
-      document.getElementById("device-app-text").textContent = guide.actionLabel
+      document.getElementById("device-app-text").textContent = guideLinks.length > 0
         ? "Установите приложение и импортируйте ключ подключения за пару шагов."
         : "Используйте совместимый клиент и импортируйте ключ подключения вручную.";
-      var appActionBtn = document.getElementById("device-app-action");
-      appActionBtn.textContent = guide.actionLabel || "Открыть";
-      appActionBtn.style.display = guide.actionUrl ? "" : "none";
-      appActionBtn.onclick = guide.actionUrl ? function() { openExternalLink(guide.actionUrl); } : null;
+      document.getElementById("device-app-actions").innerHTML = guideLinks.map(function(link) {
+        var btnClass = link.kind === "secondary" ? "secondary-action" : "primary-action";
+        return '<button type="button" class="' + btnClass + ' device-app-action device-guide-link" data-url="' + escapeHtml(link.url) + '">' + escapeHtml(link.label) + '</button>';
+      }).join("");
       document.getElementById("device-detail-title").textContent = title;
       document.getElementById("device-detail-subtitle").textContent = subtitle;
       document.getElementById("device-detail-summary").innerHTML = summaryHtml;
@@ -1962,6 +3939,15 @@ def create_web_app(
     app.router.add_post("/api/create-test-client", handle_create_test_client)
     # Admin
     app.router.add_get("/admin", handle_admin_index)
+    app.router.add_get("/admin/tariffs", handle_admin_tariffs_index)
+    app.router.add_get("/admin/payments", handle_admin_payments_index)
+    app.router.add_get("/admin/devices", handle_admin_devices_index)
+    app.router.add_get("/admin/users", handle_admin_users_index)
+    app.router.add_get("/admin/analytics", handle_admin_analytics_index)
+    app.router.add_get("/admin/users/{id}", handle_admin_user_profile)
+    app.router.add_post("/admin/users/{id}/balance", handle_admin_user_balance_adjust)
+    app.router.add_post("/admin/devices/{id}/extend", handle_admin_device_extend)
+    app.router.add_post("/admin/devices/{id}/deactivate", handle_admin_device_deactivate)
     app.router.add_post("/admin/tariffs/create", handle_admin_page_tariffs_create)
     app.router.add_post("/admin/tariffs/{id}/delete", handle_admin_page_tariffs_delete)
     app.router.add_post("/api/admin/me", handle_admin_me)
