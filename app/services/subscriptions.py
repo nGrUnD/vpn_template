@@ -66,6 +66,9 @@ async def get_active_subscriptions_by_telegram_id(
                 s.id,
                 s.server_label,
                 s.threexui_client_id,
+                s.threexui_sub_id,
+                s.subscription_url,
+                s.subscription_json_url,
                 s.config,
                 s.device_os,
                 COALESCE(s.tariff_id, t.id) AS tariff_id,
@@ -125,15 +128,21 @@ async def create_test_subscription(
                 user_id,
                 server_label,
                 threexui_client_id,
+                threexui_sub_id,
+                subscription_url,
+                subscription_json_url,
                 config,
                 is_active,
                 expires_at
-            ) VALUES ($1, $2, $3, $4, TRUE, $5)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, $8)
             RETURNING *;
             """,
             db_user_id,
             client_info.server_label,
             client_info.client_id,
+            client_info.sub_id,
+            client_info.subscription_url,
+            client_info.subscription_json_url,
             client_info.config_text,
             expires_at,
         )
@@ -175,6 +184,9 @@ async def create_subscription_from_tariff(
                 user_id,
                 server_label,
                 threexui_client_id,
+                threexui_sub_id,
+                subscription_url,
+                subscription_json_url,
                 config,
                 is_active,
                 expires_at,
@@ -184,12 +196,15 @@ async def create_subscription_from_tariff(
                 tariff_price_stars,
                 tariff_months,
                 tariff_traffic_gb
-            ) VALUES ($1, $2, $3, $4, TRUE, $5, $6, $7, $8, $8, $9, $10)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, $8, $9, $10, $11, $11, $12, $13)
             RETURNING *;
             """,
             db_user_id,
             device_label or tariff_name,
             client_info.client_id,
+            client_info.sub_id,
+            client_info.subscription_url,
+            client_info.subscription_json_url,
             client_info.config_text,
             expires_at,
             device_os,

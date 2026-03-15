@@ -141,6 +141,9 @@ async def handle_my_configs(request: web.Request) -> web.Response:
                 "id": r["id"],
                 "server_label": r["server_label"],
                 "config": r["config"],
+                "sub_id": r.get("threexui_sub_id"),
+                "subscription_url": r.get("subscription_url"),
+                "subscription_json_url": r.get("subscription_json_url"),
                 "device_os": r.get("device_os"),
                 "can_extend": bool(r.get("tariff_price_stars")) and bool(r.get("tariff_months")),
                 "renew_price_stars": r.get("tariff_price_stars"),
@@ -298,6 +301,9 @@ async def handle_purchase_tariff(request: web.Request) -> web.Response:
             "subscription": {
                 "id": subscription["id"],
                 "config": subscription["config"],
+                "sub_id": subscription.get("threexui_sub_id"),
+                "subscription_url": subscription.get("subscription_url"),
+                "subscription_json_url": subscription.get("subscription_json_url"),
                 "server_label": subscription["server_label"],
                 "expires_at": subscription["expires_at"].isoformat() if subscription["expires_at"] else None,
             },
@@ -401,6 +407,9 @@ async def handle_create_test_client(request: web.Request) -> web.Response:
         {
             "ok": True,
             "client_id": subscription["threexui_client_id"],
+            "sub_id": subscription.get("threexui_sub_id"),
+            "subscription_url": subscription.get("subscription_url"),
+            "subscription_json_url": subscription.get("subscription_json_url"),
             "remark": subscription["server_label"],
             "message": subscription["config"],
         }

@@ -120,6 +120,24 @@ async def init_db(db_config: DatabaseConfig) -> None:
             ADD COLUMN IF NOT EXISTS tariff_traffic_gb INT;
             """
         )
+        await conn.execute(
+            """
+            ALTER TABLE subscriptions
+            ADD COLUMN IF NOT EXISTS threexui_sub_id TEXT;
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE subscriptions
+            ADD COLUMN IF NOT EXISTS subscription_url TEXT;
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE subscriptions
+            ADD COLUMN IF NOT EXISTS subscription_json_url TEXT;
+            """
+        )
 
         await conn.execute(
             """

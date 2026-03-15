@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
+import base64
+import binascii
 import json
+import secrets
+import string
 import time
 import urllib.parse
 import uuid
@@ -25,6 +29,9 @@ class ThreeXUIClientInfo:
     config_text: str
     remark: Optional[str] = None
     server_label: Optional[str] = None
+    sub_id: Optional[str] = None
+    subscription_url: Optional[str] = None
+    subscription_json_url: Optional[str] = None
 
 
 class ThreeXUIClient:
@@ -59,6 +66,74 @@ class ThreeXUIClient:
         response.raise_for_status()
         self._auth_cookies = dict(response.cookies)
 
+    def _generate_sub_id(self, length: int = 16) -> str:
+        alphabet = string.ascii_lowercase + string.digits
+        return "".join(secrets.choice(alphabet) for _ in range(max(length, 8)))
+
+    def _join_url_with_id(self, base: str, item_id: str) -> str:
+        return base if not item_id else (base if base.endswith("/") else base + "/") + item_id
+
+    async def _fetch_panel_settings(self) -> dict[str, Any]:
+        await self._ensure_login()
+        response = await self._client.post("/panel/setting/all", cookies=self._auth_cookies)
+        response.raise_for_status()
+        payload = self._extract_payload(response.json())
+        return payload if isinstance(payload, dict) else {}
+
+    def _build_subscription_urls(self, settings: dict[str, Any], sub_id: str) -> tuple[str | None, str | None]:
+        if not sub_id:
+            return None, None
+        sub_uri = str(settings.get("subURI") or "").strip()
+        sub_json_uri = str(settings.get("subJsonURI") or "").strip()
+        if not sub_uri or not sub_json_uri:
+            parsed = urllib.parse.urlparse(getattr(self._config, "base_url", "") or "")
+            base = ""
+            if parsed.scheme and parsed.netloc:
+                base = f"{parsed.scheme}://{parsed.netloc}"
+            sub_path = str(settings.get("subPath") or "/sub/").strip() or "/sub/"
+            sub_json_path = str(settings.get("subJsonPath") or "/json/").strip() or "/json/"
+            if not sub_path.startswith("/"):
+                sub_path = "/" + sub_path
+            if not sub_json_path.startswith("/"):
+                sub_json_path = "/" + sub_json_path
+            if base:
+                if not sub_uri:
+                    sub_uri = base + sub_path
+                if not sub_json_uri:
+                    sub_json_uri = base + sub_json_path
+        subscription_url = self._join_url_with_id(sub_uri, sub_id) if sub_uri else None
+        subscription_json_url = self._join_url_with_id(sub_json_uri, sub_id) if sub_json_uri else None
+        return subscription_url, subscription_json_url
+
+    def _decode_subscription_body(self, payload: str) -> list[str]:
+        text = (payload or "").strip()
+        if not text:
+            return []
+        raw_lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if any(line.startswith(("vless://", "vmess://", "trojan://", "ss://")) for line in raw_lines):
+            return raw_lines
+        try:
+            padding = "=" * (-len(text) % 4)
+            decoded = base64.b64decode(text + padding).decode("utf-8", errors="ignore")
+        except (binascii.Error, ValueError):
+            return raw_lines
+        return [line.strip() for line in decoded.splitlines() if line.strip()]
+
+    async def _fetch_config_from_subscription(self, subscription_url: str | None) -> str | None:
+        if not subscription_url:
+            return None
+        try:
+            response = await self._client.get(
+                subscription_url,
+                headers={"Accept": "text/plain, */*"},
+                follow_redirects=True,
+            )
+            response.raise_for_status()
+        except Exception:
+            return None
+        lines = self._decode_subscription_body(response.text)
+        return lines[0] if lines else None
+
     async def create_vless_client(
         self,
         telegram_id: int,
@@ -86,6 +161,7 @@ class ThreeXUIClient:
 
         client_uuid = str(uuid.uuid4())
         client_email = remark or f"tg_{telegram_id}"
+        sub_id = self._generate_sub_id()
 
         # В API 3x-ui totalGB передаётся в БАЙТАХ. 0 = безлимит, иначе total_gb * 1024³
         total_bytes = 0 if total_gb <= 0 else int(total_gb) * (1024**3)
@@ -101,7 +177,7 @@ class ThreeXUIClient:
             "expiryTime": expiry_ts_ms,
             "enable": True,
             "tgId": int(telegram_id),
-            "subId": "",
+            "subId": sub_id,
             "comment": client_email,
             "reset": 0,
         }
@@ -117,13 +193,25 @@ class ThreeXUIClient:
         )
         response.raise_for_status()
 
-        # Пытаемся получить конфиг из данных инбаунда (listen, port, streamSettings) — как делает сама панель.
-        config_text = await self._build_client_link_from_inbound(
-            inbound_id=inbound_id,
-            client_uuid=client_uuid,
-            client_email=client_email,
-        )
+        subscription_url = None
+        subscription_json_url = None
+        try:
+            settings = await self._fetch_panel_settings()
+            subscription_url, subscription_json_url = self._build_subscription_urls(settings, sub_id)
+        except Exception:
+            subscription_url = None
+            subscription_json_url = None
+
+        config_text = await self._fetch_config_from_subscription(subscription_url)
         if not config_text:
+            # Фолбэк: генерируем ссылку из тех же полей inbound/client, что использует фронтенд панели.
+            config_text = await self._build_client_link_from_inbound(
+                inbound_id=inbound_id,
+                client_uuid=client_uuid,
+                client_email=client_email,
+            )
+        if not config_text:
+            # Последний фолбэк: простая ссылка из env.
             server = getattr(self._config, "vless_server", None) or None
             port = getattr(self._config, "vless_port", None)
             if server and port is not None:
@@ -134,6 +222,9 @@ class ThreeXUIClient:
             client_id=client_uuid,
             config_text=config_text,
             remark=client_email,
+            sub_id=sub_id,
+            subscription_url=subscription_url,
+            subscription_json_url=subscription_json_url,
         )
 
     async def _get_inbound(self, inbound_id: int) -> Optional[dict[str, Any]]:
@@ -301,6 +392,7 @@ class ThreeXUIClient:
         obj: dict[str, Any],
         client_uuid: str,
         client_email: str,
+        client_flow: str = "",
     ) -> Optional[str]:
         """
         Собрать VLESS-ссылку из объекта инбаунда (listen, port, streamSettings).
@@ -337,7 +429,73 @@ class ThreeXUIClient:
             network = self._get_nested(stream, "network", "Network") or "tcp"
             security = self._get_nested(stream, "security", "Security") or "none"
             # VLESS требует encryption=none
-            params = ["type=" + str(network), "encryption=none", "security=" + str(security)]
+            params = ["type=" + str(network), "encryption=none"]
+            tcp = self._get_nested(stream, "tcpSettings", "tcp_settings") or {}
+            if isinstance(tcp, str):
+                tcp = json.loads(tcp) if tcp.strip() else {}
+            ws = self._get_nested(stream, "wsSettings", "ws_settings") or {}
+            if isinstance(ws, str):
+                ws = json.loads(ws) if ws.strip() else {}
+            grpc = self._get_nested(stream, "grpcSettings", "grpc_settings") or {}
+            if isinstance(grpc, str):
+                grpc = json.loads(grpc) if grpc.strip() else {}
+            httpupgrade = self._get_nested(stream, "httpupgradeSettings", "httpupgrade_settings") or {}
+            if isinstance(httpupgrade, str):
+                httpupgrade = json.loads(httpupgrade) if httpupgrade.strip() else {}
+            xhttp = self._get_nested(stream, "xhttpSettings", "xhttp_settings") or {}
+            if isinstance(xhttp, str):
+                xhttp = json.loads(xhttp) if xhttp.strip() else {}
+
+            if network == "tcp":
+                header = self._get_nested(tcp, "header", "Header") or {}
+                request = self._get_nested(header, "request", "Request") or {}
+                header_type = self._get_nested(header, "type", "Type")
+                if header_type == "http":
+                    path_list = request.get("path") or []
+                    if isinstance(path_list, list) and path_list:
+                        params.append("path=" + urllib.parse.quote(",".join(str(x) for x in path_list), safe=""))
+                    headers = request.get("headers") or {}
+                    host = headers.get("Host") or headers.get("host") or ""
+                    if isinstance(host, list):
+                        host = ",".join(str(x) for x in host if x)
+                    if host:
+                        params.append("host=" + urllib.parse.quote(str(host), safe=""))
+                    params.append("headerType=http")
+            elif network == "ws":
+                path = ws.get("path") or ""
+                host_header = ws.get("host") or ws.get("Host") or ""
+                if path:
+                    params.append("path=" + urllib.parse.quote(str(path), safe="/,"))
+                if host_header:
+                    params.append("host=" + urllib.parse.quote(str(host_header), safe=",:"))
+            elif network == "grpc":
+                service_name = grpc.get("serviceName") or grpc.get("service_name") or ""
+                authority = grpc.get("authority") or ""
+                if service_name:
+                    params.append("serviceName=" + urllib.parse.quote(str(service_name), safe=""))
+                if authority:
+                    params.append("authority=" + urllib.parse.quote(str(authority), safe=""))
+                if grpc.get("multiMode") or grpc.get("multi_mode"):
+                    params.append("mode=multi")
+            elif network == "httpupgrade":
+                path = httpupgrade.get("path") or ""
+                host_header = httpupgrade.get("host") or httpupgrade.get("Host") or ""
+                if path:
+                    params.append("path=" + urllib.parse.quote(str(path), safe="/,"))
+                if host_header:
+                    params.append("host=" + urllib.parse.quote(str(host_header), safe=",:"))
+            elif network == "xhttp":
+                path = xhttp.get("path") or ""
+                host_header = xhttp.get("host") or xhttp.get("Host") or ""
+                mode = xhttp.get("mode") or ""
+                if path:
+                    params.append("path=" + urllib.parse.quote(str(path), safe="/,"))
+                if host_header:
+                    params.append("host=" + urllib.parse.quote(str(host_header), safe=",:"))
+                if mode:
+                    params.append("mode=" + urllib.parse.quote(str(mode), safe=""))
+
+            params.append("security=" + str(security))
             if security == "reality":
                 reality = self._get_nested(stream, "realitySettings", "reality_settings") or {}
                 if isinstance(reality, str):
@@ -383,7 +541,16 @@ class ThreeXUIClient:
                     params.append("sni=" + urllib.parse.quote(sni, safe=""))
                 if sid:
                     params.append("sid=" + urllib.parse.quote(str(sid), safe=""))
-                params.append("spx=%2F")
+                spider_x = (
+                    self._get_nested(reality, "spiderX", "spider_x")
+                    or settings.get("spiderX")
+                    or settings.get("spider_x")
+                    or "/"
+                )
+                if spider_x:
+                    params.append("spx=" + urllib.parse.quote(str(spider_x), safe=""))
+                if network == "tcp" and client_flow:
+                    params.append("flow=" + urllib.parse.quote(str(client_flow), safe=""))
             query = "&".join(params)
             frag = urllib.parse.quote(client_email, safe="")
             return f"vless://{client_uuid}@{host}:{port}/?{query}#{frag}"
@@ -400,7 +567,10 @@ class ThreeXUIClient:
         obj = await self._get_inbound(inbound_id)
         if not obj:
             return None
-        return self._build_vless_from_inbound(obj, client_uuid, client_email)
+        clients = self._extract_clients(obj)
+        target = next((client for client in clients if client.get("id") == client_uuid), None)
+        client_flow = str((target or {}).get("flow") or "").strip()
+        return self._build_vless_from_inbound(obj, client_uuid, client_email, client_flow=client_flow)
 
     async def get_client_config(self, client_id: str) -> str:
         """
