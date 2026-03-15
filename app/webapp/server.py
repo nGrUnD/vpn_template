@@ -655,7 +655,7 @@ async def handle_index(request: web.Request) -> web.Response:
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <style>
     * { box-sizing: border-box; }
-    body {
+    :root {
       --surface: #1e293b;
       --surface-raised: #263244;
       --surface-alt: #0f172a;
@@ -676,6 +676,8 @@ async def handle_index(request: web.Request) -> web.Response:
       --wallet-start: #083344;
       --wallet-end: #052e16;
       --wallet-border: rgba(56, 189, 248, 0.18);
+    }
+    body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background: var(--bg, #0f172a);
       color: var(--text, #e5e7eb);
