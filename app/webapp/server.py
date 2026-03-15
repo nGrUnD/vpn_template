@@ -823,8 +823,14 @@ async def handle_index(request: web.Request) -> web.Response:
       padding: 14px;
       border: 1px solid var(--border, #334155);
       box-shadow: 0 2px 10px rgba(2, 6, 23, 0.04);
+      cursor: pointer;
+      transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
     }
+    .config-card:active { transform: scale(0.995); }
+    .config-card:hover { border-color: var(--accent-strong); box-shadow: var(--shadow-soft); }
+    .config-card .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
     .config-card .label { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+    .config-card .open-hint { font-size: 18px; color: var(--hint, #94a3b8); line-height: 1; }
     .config-card .details { margin: 10px 0; display: grid; gap: 8px; }
     .config-card .detail-row {
       display: flex;
@@ -883,6 +889,273 @@ async def handle_index(request: web.Request) -> web.Response:
     .toast { position: fixed; bottom: 96px; left: 16px; right: 16px; background: var(--surface-raised); border: 1px solid var(--border, #334155); border-radius: 12px; padding: 12px 16px; text-align: center; font-size: 14px; box-shadow: var(--shadow-soft); z-index: 180; display: none; }
     .toast.show { display: block; }
     .loading { opacity: 0.7; pointer-events: none; }
+    .device-detail-screen {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 220;
+      background: var(--bg, #0f172a);
+      overflow-y: auto;
+      padding: 18px 16px calc(110px + env(safe-area-inset-bottom, 0px));
+    }
+    .device-detail-screen.show { display: block; }
+    .device-detail-shell { max-width: 720px; margin: 0 auto; }
+    .device-detail-topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+    .device-detail-btn {
+      border: 1px solid var(--border, #334155);
+      background: var(--surface);
+      color: var(--text, #e5e7eb);
+      border-radius: 12px;
+      padding: 10px 14px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .device-detail-hero {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      margin: 8px 0 18px;
+      padding: 24px 18px 22px;
+      border-radius: 28px;
+      background:
+        radial-gradient(circle at top, rgba(139, 92, 246, 0.28), transparent 42%),
+        linear-gradient(180deg, var(--surface-raised), var(--surface));
+      border: 1px solid var(--border, #334155);
+      box-shadow: var(--shadow-soft);
+      overflow: hidden;
+    }
+    .device-detail-hero::before {
+      content: "";
+      position: absolute;
+      inset: -20% auto auto 50%;
+      width: 240px;
+      height: 240px;
+      transform: translateX(-50%);
+      background: radial-gradient(circle, rgba(56, 189, 248, 0.24), transparent 68%);
+      pointer-events: none;
+    }
+    .device-detail-chip {
+      position: relative;
+      z-index: 1;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 14px;
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.22);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: var(--text, #e5e7eb);
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 14px;
+      backdrop-filter: blur(10px);
+    }
+    .device-detail-chip-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, #38bdf8, #8b5cf6);
+      box-shadow: 0 0 12px rgba(139, 92, 246, 0.45);
+    }
+    .device-detail-platform {
+      position: relative;
+      z-index: 1;
+      width: 86px;
+      height: 86px;
+      border-radius: 26px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, rgba(56, 189, 248, 0.24), rgba(139, 92, 246, 0.26));
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      box-shadow: 0 16px 36px rgba(15, 23, 42, 0.22);
+      margin-bottom: 14px;
+      color: #fff;
+    }
+    .device-detail-platform svg,
+    .device-app-icon svg {
+      width: 40px;
+      height: 40px;
+      display: block;
+    }
+    .device-detail-check {
+      position: relative;
+      z-index: 1;
+      width: 72px;
+      height: 72px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, #10b981, #14b8a6);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 36px;
+      font-weight: 800;
+      box-shadow: var(--shadow-soft);
+      margin-bottom: 14px;
+    }
+    .device-detail-check.hidden { display: none; }
+    .device-detail-title { position: relative; z-index: 1; font-size: 30px; font-weight: 800; margin-bottom: 8px; }
+    .device-detail-subtitle { position: relative; z-index: 1; font-size: 14px; color: var(--hint, #94a3b8); max-width: 540px; line-height: 1.55; }
+    .device-app-card {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      background: linear-gradient(180deg, var(--surface-raised), var(--surface));
+      border: 1px solid var(--border, #334155);
+      border-radius: 20px;
+      padding: 16px;
+      margin-bottom: 16px;
+      box-shadow: var(--shadow-soft);
+    }
+    .device-app-icon {
+      width: 58px;
+      height: 58px;
+      min-width: 58px;
+      border-radius: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, rgba(56, 189, 248, 0.2), rgba(139, 92, 246, 0.24));
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+    }
+    .device-app-meta { flex: 1; min-width: 0; }
+    .device-app-label { font-size: 12px; color: var(--hint, #94a3b8); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
+    .device-app-name { font-size: 18px; font-weight: 800; margin-bottom: 4px; }
+    .device-app-text { font-size: 14px; color: var(--hint, #94a3b8); line-height: 1.45; }
+    .device-app-action {
+      width: auto;
+      min-width: 176px;
+      box-shadow: 0 12px 24px rgba(139, 92, 246, 0.18);
+    }
+    .device-summary {
+      background: var(--surface);
+      border: 1px solid var(--border, #334155);
+      border-radius: 18px;
+      overflow: hidden;
+      margin-bottom: 16px;
+      box-shadow: var(--shadow-soft);
+    }
+    .device-summary-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--surface-soft-border);
+    }
+    .device-summary-row:last-child { border-bottom: none; }
+    .device-summary-label { font-size: 14px; color: var(--hint, #94a3b8); }
+    .device-summary-value { font-size: 15px; font-weight: 700; color: var(--text, #e5e7eb); text-align: right; }
+    .device-summary-value.status-active { color: #10b981; }
+    .setup-steps {
+      display: grid;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .setup-step {
+      display: flex;
+      gap: 14px;
+      align-items: flex-start;
+      background: linear-gradient(180deg, var(--surface-raised), var(--surface));
+      border: 1px solid var(--border, #334155);
+      border-radius: 20px;
+      padding: 16px;
+      box-shadow: var(--shadow-soft);
+      position: relative;
+      overflow: hidden;
+    }
+    .setup-step::after {
+      content: "";
+      position: absolute;
+      inset: auto -30px -36px auto;
+      width: 120px;
+      height: 120px;
+      background: radial-gradient(circle, rgba(139, 92, 246, 0.12), transparent 68%);
+      pointer-events: none;
+    }
+    .setup-step-index {
+      min-width: 30px;
+      width: 30px;
+      height: 30px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, #8b5cf6, #38bdf8);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: 800;
+      box-shadow: 0 10px 18px rgba(139, 92, 246, 0.2);
+    }
+    .setup-step-body { position: relative; z-index: 1; flex: 1; }
+    .setup-step-title { font-size: 16px; font-weight: 700; margin-bottom: 4px; }
+    .setup-step-text { font-size: 14px; color: var(--hint, #94a3b8); line-height: 1.45; }
+    .setup-step-action { margin-top: 10px; }
+    .primary-action,
+    .secondary-action {
+      width: 100%;
+      border: none;
+      border-radius: 14px;
+      padding: 14px 16px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .primary-action {
+      background: var(--button, #8b5cf6);
+      color: var(--button-text, #fff);
+    }
+    .secondary-action {
+      background: var(--surface);
+      color: var(--text, #e5e7eb);
+      border: 1px solid var(--border, #334155);
+    }
+    .device-key-label { font-size: 14px; font-weight: 700; margin-bottom: 10px; }
+    .device-key-box {
+      background: var(--surface);
+      border: 1px solid var(--border, #334155);
+      border-radius: 16px;
+      padding: 14px;
+      margin-bottom: 14px;
+      box-shadow: var(--shadow-soft);
+    }
+    .device-key-value {
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--text, #e5e7eb);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      word-break: break-all;
+      white-space: pre-wrap;
+    }
+    .device-detail-actions {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+    @media (max-width: 640px) {
+      .device-app-card {
+        flex-direction: column;
+        align-items: stretch;
+      }
+      .device-app-action {
+        width: 100%;
+        min-width: 0;
+      }
+      .device-detail-title {
+        font-size: 26px;
+      }
+    }
     .bottom-tabs {
       position: fixed;
       left: 0;
@@ -977,6 +1250,41 @@ async def handle_index(request: web.Request) -> web.Response:
     <div class="section-title">История операций</div>
     <div class="history-list" id="wallet-history"></div>
     <div class="empty" id="wallet-empty" style="display:none;">Операций пока нет.</div>
+  </div>
+
+  <div class="device-detail-screen" id="device-detail-screen">
+    <div class="device-detail-shell">
+      <div class="device-detail-topbar">
+        <button type="button" class="device-detail-btn" id="device-detail-back">Назад</button>
+        <button type="button" class="device-detail-btn" id="device-detail-home">На главную</button>
+      </div>
+      <div class="device-detail-hero">
+        <div class="device-detail-chip" id="device-detail-chip"><span class="device-detail-chip-dot"></span><span id="device-detail-chip-text">Устройство</span></div>
+        <div class="device-detail-platform" id="device-detail-platform-icon"></div>
+        <div class="device-detail-check" id="device-detail-check">✓</div>
+        <div class="device-detail-title" id="device-detail-title">Устройство готово</div>
+        <div class="device-detail-subtitle" id="device-detail-subtitle">Настройте приложение, вставьте ключ и подключитесь.</div>
+      </div>
+      <div class="device-app-card">
+        <div class="device-app-icon" id="device-app-icon"></div>
+        <div class="device-app-meta">
+          <div class="device-app-label">Рекомендуемое приложение</div>
+          <div class="device-app-name" id="device-app-name">VPN client</div>
+          <div class="device-app-text" id="device-app-text">Установите приложение и импортируйте ключ в пару касаний.</div>
+        </div>
+        <button type="button" class="primary-action device-app-action" id="device-app-action">Открыть</button>
+      </div>
+      <div class="device-summary" id="device-detail-summary"></div>
+      <div class="setup-steps" id="device-detail-steps"></div>
+      <div class="device-key-label">Ваш ключ подключения</div>
+      <div class="device-key-box">
+        <div class="device-key-value" id="device-detail-config"></div>
+      </div>
+      <div class="device-detail-actions">
+        <button type="button" class="primary-action" id="device-detail-copy">Скопировать ключ</button>
+        <button type="button" class="secondary-action" id="device-detail-close">Закрыть</button>
+      </div>
+    </div>
   </div>
 
   <div class="toast" id="toast"></div>
@@ -1135,6 +1443,31 @@ async def handle_index(request: web.Request) -> web.Response:
       });
     }
 
+    function escapeHtml(value) {
+      return String(value == null ? "" : value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function formatDateRu(value) {
+      if (!value) return "Без срока";
+      var date = new Date(value);
+      if (isNaN(date.getTime())) return "Без срока";
+      return "До " + date.toLocaleDateString("ru");
+    }
+
+    function openExternalLink(url) {
+      if (!url) return;
+      if (tg && typeof tg.openLink === "function") {
+        tg.openLink(url);
+      } else {
+        window.open(url, "_blank", "noopener,noreferrer");
+      }
+    }
+
     function setSelectedDevice(osName) {
       selectedDeviceOs = osName || null;
       var modalTitle = document.getElementById("modal-device-title");
@@ -1198,6 +1531,142 @@ async def handle_index(request: web.Request) -> web.Response:
     }
 
     var configsById = {};
+    var currentDetailConfigId = null;
+    var DEVICE_GUIDES = {
+      "Windows": {
+        appName: "Hiddify Next",
+        actionLabel: "Открыть загрузки Hiddify",
+        actionUrl: "https://github.com/hiddify/hiddify-next/releases",
+        steps: [
+          { title: "Скачайте клиент", text: "Откройте страницу загрузки и установите Hiddify Next для Windows." },
+          { title: "Скопируйте ключ", text: "Скопируйте ключ подключения ниже в один тап." },
+          { title: "Импортируйте профиль", text: "Откройте приложение и вставьте ключ или импортируйте его из буфера обмена." },
+          { title: "Подключитесь", text: "Активируйте подключение в приложении. После этого устройство готово к работе." }
+        ]
+      },
+      "Android": {
+        appName: "Hiddify Next",
+        actionLabel: "Открыть загрузки Hiddify",
+        actionUrl: "https://github.com/hiddify/hiddify-next/releases",
+        steps: [
+          { title: "Скачайте клиент", text: "Установите Hiddify Next для Android с официальной страницы загрузки." },
+          { title: "Скопируйте ключ", text: "Скопируйте ключ подключения ниже." },
+          { title: "Добавьте профиль", text: "Откройте приложение и импортируйте конфигурацию из буфера обмена." },
+          { title: "Подключитесь", text: "Разрешите создание VPN-подключения и включите профиль." }
+        ]
+      },
+      "iOS": {
+        appName: "v2RayTun",
+        actionLabel: "Открыть App Store",
+        actionUrl: "https://apps.apple.com/us/search?term=v2RayTun",
+        steps: [
+          { title: "Установите приложение", text: "Откройте App Store и установите v2RayTun или другой совместимый клиент." },
+          { title: "Скопируйте ключ", text: "Скопируйте ваш ключ подключения ниже." },
+          { title: "Добавьте профиль", text: "Откройте приложение и вставьте ключ в новый профиль." },
+          { title: "Подключитесь", text: "Разрешите VPN-конфигурацию и включите профиль." }
+        ]
+      }
+    };
+
+    function getDeviceGuide(osName) {
+      return DEVICE_GUIDES[osName] || {
+        appName: "совместимый VPN-клиент",
+        actionLabel: "",
+        actionUrl: "",
+        steps: [
+          { title: "Установите приложение", text: "Используйте совместимый клиент для вашего устройства." },
+          { title: "Скопируйте ключ", text: "Скопируйте ключ подключения ниже." },
+          { title: "Добавьте профиль", text: "Импортируйте конфигурацию из буфера обмена." },
+          { title: "Подключитесь", text: "Включите созданный профиль в приложении." }
+        ]
+      };
+    }
+
+    function getPlatformIcon(osName) {
+      if (osName === "Windows") {
+        return '<svg viewBox="0 0 48 48" fill="none" aria-hidden="true"><rect x="6" y="8" width="16" height="14" rx="2" fill="currentColor"></rect><rect x="26" y="8" width="16" height="14" rx="2" fill="currentColor" opacity="0.92"></rect><rect x="6" y="26" width="16" height="14" rx="2" fill="currentColor" opacity="0.92"></rect><rect x="26" y="26" width="16" height="14" rx="2" fill="currentColor"></rect></svg>';
+      }
+      if (osName === "Android") {
+        return '<svg viewBox="0 0 48 48" fill="none" aria-hidden="true"><rect x="12" y="16" width="24" height="18" rx="7" fill="currentColor"></rect><rect x="15" y="34" width="4" height="8" rx="2" fill="currentColor"></rect><rect x="29" y="34" width="4" height="8" rx="2" fill="currentColor"></rect><circle cx="19" cy="22" r="1.8" fill="#0f172a"></circle><circle cx="29" cy="22" r="1.8" fill="#0f172a"></circle><path d="M18 12L14.5 8.5" stroke="currentColor" stroke-width="3" stroke-linecap="round"></path><path d="M30 12L33.5 8.5" stroke="currentColor" stroke-width="3" stroke-linecap="round"></path></svg>';
+      }
+      if (osName === "iOS") {
+        return '<svg viewBox="0 0 48 48" fill="none" aria-hidden="true"><rect x="14" y="6" width="20" height="36" rx="6" stroke="currentColor" stroke-width="4"></rect><rect x="20" y="10" width="8" height="3" rx="1.5" fill="currentColor"></rect><circle cx="24" cy="35" r="2.5" fill="currentColor"></circle></svg>';
+      }
+      return '<svg viewBox="0 0 48 48" fill="none" aria-hidden="true"><rect x="10" y="10" width="28" height="28" rx="8" stroke="currentColor" stroke-width="4"></rect><path d="M18 24H30" stroke="currentColor" stroke-width="4" stroke-linecap="round"></path><path d="M24 18V30" stroke="currentColor" stroke-width="4" stroke-linecap="round"></path></svg>';
+    }
+
+    function copyConfigText(configValue) {
+      if (!configValue) return;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(configValue)
+          .then(function() { toast("Ключ скопирован"); })
+          .catch(function() { toast("Скопируйте ключ вручную"); });
+      } else {
+        toast("Скопируйте ключ вручную");
+      }
+    }
+
+    function hideDeviceDetail() {
+      document.getElementById("device-detail-screen").classList.remove("show");
+      currentDetailConfigId = null;
+    }
+
+    function showDeviceDetail(configId, options) {
+      options = options || {};
+      var config = typeof configId === "object" ? configId : configsById[configId];
+      if (!config) return;
+      currentDetailConfigId = config.id;
+      var guide = getDeviceGuide(config.device_os);
+      var isPurchased = !!options.justPurchased;
+      var title = isPurchased ? "Устройство добавлено" : (config.server_label || config.device_os || "Устройство");
+      var subtitle = isPurchased
+        ? "Осталось скачать приложение, вставить ключ и подключиться."
+        : "Все, что нужно для быстрого подключения на этом устройстве.";
+      var summaryHtml = [
+        '<div class="device-summary-row"><span class="device-summary-label">Статус</span><span class="device-summary-value status-active">Активно</span></div>',
+        '<div class="device-summary-row"><span class="device-summary-label">Платформа</span><span class="device-summary-value">' + escapeHtml(config.device_os || "Устройство") + '</span></div>',
+        '<div class="device-summary-row"><span class="device-summary-label">Действует до</span><span class="device-summary-value">' + escapeHtml(formatDateRu(config.expires_at)) + '</span></div>',
+        '<div class="device-summary-row"><span class="device-summary-label">Осталось трафика</span><span class="device-summary-value">' + escapeHtml(config.traffic_value || "Неизвестно") + '</span></div>'
+      ].join("");
+      var stepsHtml = guide.steps.map(function(step, idx) {
+        var actionHtml = "";
+        if (idx === 0 && guide.actionLabel && guide.actionUrl) {
+          actionHtml = '<div class="setup-step-action"><button type="button" class="device-detail-btn device-guide-link" data-url="' + escapeHtml(guide.actionUrl) + '">' + escapeHtml(guide.actionLabel) + '</button></div>';
+        }
+        return '<div class="setup-step">' +
+          '<div class="setup-step-index">' + (idx + 1) + '</div>' +
+          '<div class="setup-step-body">' +
+          '<div class="setup-step-title">' + escapeHtml(step.title) + '</div>' +
+          '<div class="setup-step-text">' + escapeHtml(step.text) + '</div>' +
+          actionHtml +
+          '</div>' +
+          '</div>';
+      }).join("");
+      document.getElementById("device-detail-chip-text").textContent = (config.device_os || "Устройство") + " · " + guide.appName;
+      document.getElementById("device-detail-platform-icon").innerHTML = getPlatformIcon(config.device_os);
+      document.getElementById("device-app-icon").innerHTML = getPlatformIcon(config.device_os);
+      document.getElementById("device-app-name").textContent = guide.appName;
+      document.getElementById("device-app-text").textContent = guide.actionLabel
+        ? "Установите приложение и импортируйте ключ подключения за пару шагов."
+        : "Используйте совместимый клиент и импортируйте ключ подключения вручную.";
+      var appActionBtn = document.getElementById("device-app-action");
+      appActionBtn.textContent = guide.actionLabel || "Открыть";
+      appActionBtn.style.display = guide.actionUrl ? "" : "none";
+      appActionBtn.onclick = guide.actionUrl ? function() { openExternalLink(guide.actionUrl); } : null;
+      document.getElementById("device-detail-title").textContent = title;
+      document.getElementById("device-detail-subtitle").textContent = subtitle;
+      document.getElementById("device-detail-summary").innerHTML = summaryHtml;
+      document.getElementById("device-detail-steps").innerHTML = stepsHtml;
+      document.getElementById("device-detail-config").textContent = config.config || "";
+      document.getElementById("device-detail-check").classList.toggle("hidden", !isPurchased);
+      document.getElementById("device-detail-screen").classList.add("show");
+      document.querySelectorAll(".device-guide-link").forEach(function(btn) {
+        btn.addEventListener("click", function() {
+          openExternalLink(btn.dataset.url);
+        });
+      });
+    }
+
     function renderConfigs(configs) {
       const root = document.getElementById("configs");
       const empty = document.getElementById("configs-empty");
@@ -1208,17 +1677,17 @@ async def handle_index(request: web.Request) -> web.Response:
         return;
       }
       empty.style.display = "none";
-      configs.forEach(function(c) { configsById[c.id] = c.config || ""; });
+      configs.forEach(function(c) { configsById[c.id] = c; });
       root.innerHTML = configs.map(function(c) {
-        const exp = c.expires_at ? "До " + new Date(c.expires_at).toLocaleDateString("ru") : "Без срока";
-        const preview = (c.config || "").substring(0, 60) + (c.config && c.config.length > 60 ? "…" : "");
+        const exp = formatDateRu(c.expires_at);
+        const preview = escapeHtml((c.config || "").substring(0, 60) + (c.config && c.config.length > 60 ? "…" : ""));
         const os = c.device_os ? c.device_os + " · " : "";
         var renewBtn = '<button type="button" class="renew-btn">Продлить</button>';
         return '<div class="config-card" data-id="' + c.id + '" data-renew-price="' + (c.renew_price_stars || '') + '" data-renew-months="' + (c.renew_months || '') + '">' +
-          '<div class="label">Конфиг · ' + os + (c.server_label || ("#" + c.id)) + '</div>' +
+          '<div class="head"><div class="label">Конфиг · ' + escapeHtml(os + (c.server_label || ("#" + c.id))) + '</div><div class="open-hint">›</div></div>' +
           '<div class="details">' +
-          '<div class="detail-row"><span class="detail-label">Действует до</span><span class="detail-value">' + exp + '</span></div>' +
-          '<div class="detail-row"><span class="detail-label">Осталось трафика</span><span class="detail-value">' + (c.traffic_value || "Неизвестно") + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">Действует до</span><span class="detail-value">' + escapeHtml(exp) + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">Осталось трафика</span><span class="detail-value">' + escapeHtml(c.traffic_value || "Неизвестно") + '</span></div>' +
           '</div>' +
           '<div class="config-preview">' + preview + '</div>' +
           '<div class="actions">' +
@@ -1226,16 +1695,24 @@ async def handle_index(request: web.Request) -> web.Response:
           renewBtn +
           '</div></div>';
       }).join("");
+      root.querySelectorAll(".config-card").forEach(function(card) {
+        card.addEventListener("click", function() {
+          const id = parseInt(card.getAttribute("data-id"), 10);
+          showDeviceDetail(id);
+        });
+      });
       root.querySelectorAll(".copy-btn").forEach(function(btn) {
-        btn.addEventListener("click", function() {
+        btn.addEventListener("click", function(event) {
+          event.stopPropagation();
           const id = parseInt(btn.closest(".config-card").getAttribute("data-id"), 10);
-          const config = configsById[id];
+          const config = configsById[id] && configsById[id].config;
           if (!config) return;
-          navigator.clipboard && navigator.clipboard.writeText(config).then(function() { toast("Скопировано"); }).catch(function() { toast("Скопируйте вручную"); });
+          copyConfigText(config);
         });
       });
       root.querySelectorAll(".renew-btn").forEach(function(btn) {
-        btn.addEventListener("click", function() {
+        btn.addEventListener("click", function(event) {
+          event.stopPropagation();
           const card = btn.closest(".config-card");
           renewalSubscriptionId = parseInt(card.getAttribute("data-id"), 10);
           tariffsModalMode = "renew";
@@ -1272,9 +1749,13 @@ async def handle_index(request: web.Request) -> web.Response:
     }
 
     function loadConfigs() {
-      if (!telegramId) { renderConfigs([]); return; }
-      apiPost("/api/my-configs", payloadBase())
-        .then(function(data) { renderConfigs(data.ok ? data.configs : []); });
+      if (!telegramId) { renderConfigs([]); return Promise.resolve([]); }
+      return apiPost("/api/my-configs", payloadBase())
+        .then(function(data) {
+          var configs = data.ok ? data.configs : [];
+          renderConfigs(configs);
+          return configs;
+        });
     }
 
     function renderWallet(transactions) {
@@ -1328,7 +1809,11 @@ async def handle_index(request: web.Request) -> web.Response:
             hideTariffsModal();
             loadDashboard();
             loadWallet();
-            loadConfigs();
+            loadConfigs().then(function() {
+              if (data.subscription && data.subscription.id) {
+                showDeviceDetail(data.subscription.id, { justPurchased: true });
+              }
+            });
           } else {
             toast(data.error || "Ошибка");
           }
@@ -1413,6 +1898,16 @@ async def handle_index(request: web.Request) -> web.Response:
     }
 
     document.getElementById("btn-open-wallet").addEventListener("click", function() { setTab("wallet"); });
+    document.getElementById("device-detail-back").addEventListener("click", hideDeviceDetail);
+    document.getElementById("device-detail-home").addEventListener("click", function() {
+      hideDeviceDetail();
+      setTab("vpn");
+    });
+    document.getElementById("device-detail-close").addEventListener("click", hideDeviceDetail);
+    document.getElementById("device-detail-copy").addEventListener("click", function() {
+      if (!currentDetailConfigId || !configsById[currentDetailConfigId]) return;
+      copyConfigText(configsById[currentDetailConfigId].config || "");
+    });
     document.getElementById("btn-add-device").addEventListener("click", function() {
       document.getElementById("device-chooser").classList.toggle("show");
     });
