@@ -119,6 +119,27 @@ class ThreeXUIClient:
             return raw_lines
         return [line.strip() for line in decoded.splitlines() if line.strip()]
 
+    def _apply_display_name_to_config(self, config_text: str | None, display_name: str) -> str | None:
+        text = (config_text or "").strip()
+        if not text or not display_name:
+            return config_text
+        if not text.startswith(("vless://", "trojan://", "ss://")):
+            return config_text
+        try:
+            split = urllib.parse.urlsplit(text)
+            return urllib.parse.urlunsplit(
+                (
+                    split.scheme,
+                    split.netloc,
+                    split.path,
+                    split.query,
+                    urllib.parse.quote(display_name, safe=""),
+                )
+            )
+        except Exception:
+            base = text.split("#", 1)[0]
+            return base + "#" + urllib.parse.quote(display_name, safe="")
+
     async def _fetch_config_from_subscription(self, subscription_url: str | None) -> str | None:
         if not subscription_url:
             return None
@@ -161,6 +182,7 @@ class ThreeXUIClient:
 
         client_uuid = str(uuid.uuid4())
         client_email = remark or f"tg_{telegram_id}"
+        display_name = client_email
         sub_id = self._generate_sub_id()
 
         # В API 3x-ui totalGB передаётся в БАЙТАХ. 0 = безлимит, иначе total_gb * 1024³
@@ -218,6 +240,7 @@ class ThreeXUIClient:
                 config_text = f"vless://{client_uuid}@{server}:{port}#{client_email}"
             else:
                 config_text = f"Скопируй конфиг из панели 3x-ui (email: {client_email})"
+        config_text = self._apply_display_name_to_config(config_text, display_name) or config_text
         return ThreeXUIClientInfo(
             client_id=client_uuid,
             config_text=config_text,

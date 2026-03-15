@@ -27,9 +27,9 @@ def _build_device_label(device_os: str | None, sequence: int) -> str | None:
 
 def _build_device_remark(telegram_id: int, device_os: str | None, sequence: int) -> str:
     if not device_os:
-        return f"vpn_{telegram_id}"
+        return f"raccster_vpn_{telegram_id}"
     normalized = "".join(ch.lower() if ch.isalnum() else "_" for ch in device_os).strip("_") or "device"
-    return f"vpn_{telegram_id}_{normalized}_{sequence}"
+    return f"raccster_vpn_{telegram_id}_{normalized}_{sequence}"
 
 
 async def _next_device_sequence(db_user_id: int, device_os: str | None) -> int:
