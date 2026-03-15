@@ -657,17 +657,25 @@ async def handle_index(request: web.Request) -> web.Response:
     * { box-sizing: border-box; }
     body {
       --surface: #1e293b;
+      --surface-raised: #263244;
       --surface-alt: #0f172a;
       --surface-soft: rgba(15, 23, 42, 0.55);
       --surface-soft-border: rgba(148, 163, 184, 0.14);
       --modal-overlay: rgba(2, 6, 23, 0.82);
       --tabbar-bg: rgba(2, 6, 23, 0.95);
+      --border: #334155;
+      --accent: #38bdf8;
+      --accent-soft: rgba(139, 92, 246, 0.18);
+      --accent-strong: #c4b5fd;
+      --shadow-soft: 0 10px 32px rgba(2, 6, 23, 0.18);
       --summary-start: #312e81;
       --summary-end: #0f4c81;
       --summary-text: #ffffff;
       --summary-muted: rgba(255,255,255,0.78);
+      --summary-border: rgba(148, 163, 184, 0.2);
       --wallet-start: #083344;
       --wallet-end: #052e16;
+      --wallet-border: rgba(56, 189, 248, 0.18);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background: var(--bg, #0f172a);
       color: var(--text, #e5e7eb);
@@ -687,11 +695,12 @@ async def handle_index(request: web.Request) -> web.Response:
     .section-title { font-size: 15px; font-weight: 600; color: var(--hint, #94a3b8); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
     .summary-card {
       background: linear-gradient(135deg, var(--summary-start), var(--summary-end));
-      border: 1px solid rgba(148, 163, 184, 0.2);
+      border: 1px solid var(--summary-border);
       border-radius: 18px;
       padding: 18px;
       margin-bottom: 18px;
       color: var(--summary-text);
+      box-shadow: var(--shadow-soft);
     }
     .summary-card .label { color: var(--summary-muted); font-size: 13px; margin-bottom: 8px; }
     .summary-card .value { font-size: 36px; font-weight: 700; margin-bottom: 6px; }
@@ -720,6 +729,7 @@ async def handle_index(request: web.Request) -> web.Response:
       padding: 16px;
       border: 1px solid var(--border, #334155);
       margin-bottom: 18px;
+      box-shadow: var(--shadow-soft);
     }
     .device-chooser.show { display: block; }
     .device-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
@@ -734,9 +744,9 @@ async def handle_index(request: web.Request) -> web.Response:
       font-weight: 600;
     }
     .device-chip.active {
-      background: rgba(139, 92, 246, 0.18);
-      border-color: #8b5cf6;
-      color: #c4b5fd;
+      background: var(--accent-soft);
+      border-color: var(--accent-strong);
+      color: var(--accent-strong);
     }
     .selected-device {
       display: none;
@@ -758,10 +768,11 @@ async def handle_index(request: web.Request) -> web.Response:
     .tariffs-modal-card {
       max-width: 640px;
       margin: 20px auto 100px auto;
-      background: var(--surface);
+      background: var(--surface-raised);
       border: 1px solid var(--border, #334155);
       border-radius: 18px;
       padding: 16px;
+      box-shadow: var(--shadow-soft);
     }
     .modal-header {
       display: flex;
@@ -784,6 +795,7 @@ async def handle_index(request: web.Request) -> web.Response:
       border-radius: 16px;
       padding: 16px;
       border: 1px solid var(--border, #334155);
+      box-shadow: 0 2px 10px rgba(2, 6, 23, 0.04);
     }
     .tariff-card .name { font-size: 17px; font-weight: 600; margin-bottom: 4px; }
     .tariff-card .meta { font-size: 13px; color: var(--hint, #94a3b8); margin-bottom: 12px; }
@@ -808,6 +820,7 @@ async def handle_index(request: web.Request) -> web.Response:
       border-radius: 12px;
       padding: 14px;
       border: 1px solid var(--border, #334155);
+      box-shadow: 0 2px 10px rgba(2, 6, 23, 0.04);
     }
     .config-card .label { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
     .config-card .details { margin: 10px 0; display: grid; gap: 8px; }
@@ -839,14 +852,16 @@ async def handle_index(request: web.Request) -> web.Response:
     .config-card .actions button.primary { background: var(--button, #5288c1); color: var(--button-text, #fff); }
     .wallet-card {
       background: linear-gradient(135deg, var(--wallet-start), var(--wallet-end));
-      border: 1px solid rgba(56, 189, 248, 0.18);
+      border: 1px solid var(--wallet-border);
       border-radius: 18px;
       padding: 18px;
       margin-bottom: 18px;
       color: var(--summary-text);
+      box-shadow: var(--shadow-soft);
     }
+    .wallet-card .label { color: var(--summary-muted); font-size: 13px; margin-bottom: 8px; }
     .wallet-card .value { font-size: 34px; font-weight: 700; margin-top: 10px; }
-    .wallet-note { color: var(--hint, #94a3b8); font-size: 13px; margin-bottom: 14px; }
+    .wallet-note { color: var(--summary-muted); font-size: 13px; margin-bottom: 14px; }
     .topup-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 18px; }
     .history-list { display: flex; flex-direction: column; gap: 10px; }
     .history-item {
@@ -858,11 +873,12 @@ async def handle_index(request: web.Request) -> web.Response:
       border-radius: 14px;
       background: var(--surface);
       border: 1px solid var(--border, #334155);
+      box-shadow: 0 2px 10px rgba(2, 6, 23, 0.04);
     }
     .history-item .meta { font-size: 12px; color: var(--hint, #94a3b8); margin-top: 4px; }
     .history-item .amount { font-size: 15px; font-weight: 700; }
     .empty { text-align: center; color: var(--hint); font-size: 14px; padding: 24px; }
-    .toast { position: fixed; bottom: 96px; left: 16px; right: 16px; background: var(--surface); border-radius: 12px; padding: 12px 16px; text-align: center; font-size: 14px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); z-index: 180; display: none; }
+    .toast { position: fixed; bottom: 96px; left: 16px; right: 16px; background: var(--surface-raised); border: 1px solid var(--border, #334155); border-radius: 12px; padding: 12px 16px; text-align: center; font-size: 14px; box-shadow: var(--shadow-soft); z-index: 180; display: none; }
     .toast.show { display: block; }
     .loading { opacity: 0.7; pointer-events: none; }
     .bottom-tabs {
@@ -877,6 +893,7 @@ async def handle_index(request: web.Request) -> web.Response:
       background: var(--tabbar-bg);
       border-top: 1px solid var(--border, #334155);
       backdrop-filter: blur(10px);
+      box-shadow: 0 -6px 24px rgba(2, 6, 23, 0.08);
     }
     .tab-btn {
       border: none;
@@ -889,8 +906,8 @@ async def handle_index(request: web.Request) -> web.Response:
       cursor: pointer;
     }
     .tab-btn.active {
-      color: #c4b5fd;
-      background: rgba(139, 92, 246, 0.14);
+      color: var(--accent-strong);
+      background: var(--accent-soft);
     }
   </style>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
@@ -898,7 +915,7 @@ async def handle_index(request: web.Request) -> web.Response:
 <body>
   <div class="header">Raccaster VPN</div>
   <div id="admin-link-wrap" style="display:none; margin-bottom: 16px;">
-    <a href="/admin" id="admin-link" style="display:inline-block; padding: 10px 16px; background: var(--secondary, #334155); color: var(--hint, #94a3b8); border-radius: 12px; text-decoration: none; font-size: 14px;">⚙ Админ-панель</a>
+    <a href="/admin" id="admin-link" style="display:inline-block; padding: 10px 16px; background: var(--surface); color: var(--text, #e5e7eb); border: 1px solid var(--border, #334155); border-radius: 12px; text-decoration: none; font-size: 14px;">⚙ Админ-панель</a>
   </div>
 
   <div class="tab-page active" id="tab-vpn">
@@ -1003,10 +1020,12 @@ async def handle_index(request: web.Request) -> web.Response:
       return (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255;
     }
 
-    if (tg) {
-      tg.expand();
-      tg.MainButton.hide();
-      var th = tg.themeParams || {};
+    function setThemeVar(name, value) {
+      if (value) document.documentElement.style.setProperty(name, value);
+    }
+
+    function applyTelegramTheme(th) {
+      th = th || {};
       if (th.bg_color) document.documentElement.style.setProperty("--bg", th.bg_color);
       if (th.text_color) document.documentElement.style.setProperty("--text", th.text_color);
       if (th.hint_color) document.documentElement.style.setProperty("--hint", th.hint_color);
@@ -1018,27 +1037,54 @@ async def handle_index(request: web.Request) -> web.Response:
       }
       var bg = th.bg_color || "#0f172a";
       var secondary = th.secondary_bg_color || mixColor(bg, "#ffffff", 0.08);
+      var accent = th.button_color || "#8b5cf6";
       var isLight = luminance(bg) > 0.72;
+      setThemeVar("--accent", accent);
       if (isLight) {
-        document.documentElement.style.setProperty("--surface", secondary);
-        document.documentElement.style.setProperty("--surface-alt", mixColor(bg, "#dbe4f0", 0.35));
-        document.documentElement.style.setProperty("--surface-soft", mixColor(bg, "#dbe4f0", 0.42));
-        document.documentElement.style.setProperty("--surface-soft-border", "rgba(100, 116, 139, 0.18)");
-        document.documentElement.style.setProperty("--modal-overlay", "rgba(15, 23, 42, 0.28)");
-        document.documentElement.style.setProperty("--tabbar-bg", "rgba(248, 250, 252, 0.94)");
-        document.documentElement.style.setProperty("--summary-start", mixColor(bg, "#8b5cf6", 0.16));
-        document.documentElement.style.setProperty("--summary-end", mixColor(bg, "#0ea5e9", 0.16));
-        document.documentElement.style.setProperty("--summary-text", th.text_color || "#0f172a");
-        document.documentElement.style.setProperty("--summary-muted", mixColor(th.text_color || "#0f172a", "#ffffff", 0.35));
-        document.documentElement.style.setProperty("--wallet-start", mixColor(bg, "#14b8a6", 0.12));
-        document.documentElement.style.setProperty("--wallet-end", mixColor(bg, "#22c55e", 0.12));
+        setThemeVar("--surface", secondary);
+        setThemeVar("--surface-raised", mixColor(secondary, "#ffffff", 0.3));
+        setThemeVar("--surface-alt", mixColor(secondary, "#dbe4f0", 0.42));
+        setThemeVar("--surface-soft", mixColor(secondary, "#dbe4f0", 0.58));
+        setThemeVar("--surface-soft-border", "rgba(100, 116, 139, 0.18)");
+        setThemeVar("--border", mixColor(secondary, "#94a3b8", 0.46));
+        setThemeVar("--modal-overlay", "rgba(15, 23, 42, 0.24)");
+        setThemeVar("--tabbar-bg", "rgba(248, 250, 252, 0.94)");
+        setThemeVar("--accent-soft", mixColor(bg, accent, 0.18));
+        setThemeVar("--accent-strong", mixColor(accent, "#4c1d95", 0.28));
+        setThemeVar("--shadow-soft", "0 10px 32px rgba(15, 23, 42, 0.10)");
+        setThemeVar("--summary-start", mixColor("#ffffff", "#8b5cf6", 0.2));
+        setThemeVar("--summary-end", mixColor("#ffffff", "#0ea5e9", 0.24));
+        setThemeVar("--summary-text", th.text_color || "#0f172a");
+        setThemeVar("--summary-muted", mixColor(th.text_color || "#0f172a", "#ffffff", 0.35));
+        setThemeVar("--summary-border", mixColor("#ffffff", accent, 0.18));
+        setThemeVar("--wallet-start", mixColor("#ffffff", "#14b8a6", 0.18));
+        setThemeVar("--wallet-end", mixColor("#ffffff", "#22c55e", 0.2));
+        setThemeVar("--wallet-border", mixColor("#ffffff", "#14b8a6", 0.2));
       } else {
-        document.documentElement.style.setProperty("--surface", secondary);
-        document.documentElement.style.setProperty("--surface-alt", mixColor(bg, "#020617", 0.35));
-        document.documentElement.style.setProperty("--surface-soft", "rgba(15, 23, 42, 0.55)");
-        document.documentElement.style.setProperty("--surface-soft-border", "rgba(148, 163, 184, 0.14)");
-        document.documentElement.style.setProperty("--modal-overlay", "rgba(2, 6, 23, 0.82)");
-        document.documentElement.style.setProperty("--tabbar-bg", "rgba(2, 6, 23, 0.95)");
+        setThemeVar("--surface", secondary);
+        setThemeVar("--surface-raised", mixColor(secondary, "#334155", 0.18));
+        setThemeVar("--surface-alt", mixColor(bg, "#020617", 0.35));
+        setThemeVar("--surface-soft", "rgba(15, 23, 42, 0.55)");
+        setThemeVar("--surface-soft-border", "rgba(148, 163, 184, 0.14)");
+        setThemeVar("--border", mixColor(secondary, "#94a3b8", 0.22));
+        setThemeVar("--modal-overlay", "rgba(2, 6, 23, 0.82)");
+        setThemeVar("--tabbar-bg", "rgba(2, 6, 23, 0.95)");
+        setThemeVar("--accent-soft", mixColor(bg, accent, 0.2));
+        setThemeVar("--accent-strong", mixColor(accent, "#ffffff", 0.35));
+        setThemeVar("--shadow-soft", "0 10px 32px rgba(2, 6, 23, 0.28)");
+        setThemeVar("--summary-border", "rgba(148, 163, 184, 0.2)");
+        setThemeVar("--wallet-border", "rgba(56, 189, 248, 0.18)");
+      }
+    }
+
+    if (tg) {
+      tg.expand();
+      tg.MainButton.hide();
+      applyTelegramTheme(tg.themeParams || {});
+      if (typeof tg.onEvent === "function") {
+        tg.onEvent("themeChanged", function() {
+          applyTelegramTheme(tg.themeParams || {});
+        });
       }
     }
 
