@@ -656,6 +656,18 @@ async def handle_index(request: web.Request) -> web.Response:
   <style>
     * { box-sizing: border-box; }
     body {
+      --surface: #1e293b;
+      --surface-alt: #0f172a;
+      --surface-soft: rgba(15, 23, 42, 0.55);
+      --surface-soft-border: rgba(148, 163, 184, 0.14);
+      --modal-overlay: rgba(2, 6, 23, 0.82);
+      --tabbar-bg: rgba(2, 6, 23, 0.95);
+      --summary-start: #312e81;
+      --summary-end: #0f4c81;
+      --summary-text: #ffffff;
+      --summary-muted: rgba(255,255,255,0.78);
+      --wallet-start: #083344;
+      --wallet-end: #052e16;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background: var(--bg, #0f172a);
       color: var(--text, #e5e7eb);
@@ -664,20 +676,26 @@ async def handle_index(request: web.Request) -> web.Response:
       padding-bottom: calc(96px + env(safe-area-inset-bottom, 16px));
       min-height: 100vh;
     }
-    .header { font-size: 22px; font-weight: 700; margin-bottom: 20px; }
+    .header {
+      font-size: 24px;
+      font-weight: 800;
+      margin-bottom: 20px;
+      letter-spacing: 0.02em;
+    }
     .tab-page { display: none; }
     .tab-page.active { display: block; }
     .section-title { font-size: 15px; font-weight: 600; color: var(--hint, #94a3b8); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
     .summary-card {
-      background: linear-gradient(135deg, #312e81, #0f4c81);
+      background: linear-gradient(135deg, var(--summary-start), var(--summary-end));
       border: 1px solid rgba(148, 163, 184, 0.2);
       border-radius: 18px;
       padding: 18px;
       margin-bottom: 18px;
+      color: var(--summary-text);
     }
-    .summary-card .label { color: rgba(255,255,255,0.8); font-size: 13px; margin-bottom: 8px; }
+    .summary-card .label { color: var(--summary-muted); font-size: 13px; margin-bottom: 8px; }
     .summary-card .value { font-size: 36px; font-weight: 700; margin-bottom: 6px; }
-    .summary-card .meta { font-size: 14px; color: rgba(255,255,255,0.75); }
+    .summary-card .meta { font-size: 14px; color: var(--summary-muted); }
     .vpn-actions { display: flex; gap: 10px; margin-bottom: 18px; }
     .vpn-actions button {
       flex: 1;
@@ -691,13 +709,13 @@ async def handle_index(request: web.Request) -> web.Response:
       cursor: pointer;
     }
     .vpn-actions button.secondary {
-      background: var(--secondary, #1e293b);
+      background: var(--surface);
       border: 1px solid var(--border, #334155);
       color: var(--text, #e5e7eb);
     }
     .device-chooser {
       display: none;
-      background: var(--card-bg, #1e293b);
+      background: var(--surface);
       border-radius: 16px;
       padding: 16px;
       border: 1px solid var(--border, #334155);
@@ -707,7 +725,7 @@ async def handle_index(request: web.Request) -> web.Response:
     .device-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
     .device-chip, .topup-btn {
       border: 1px solid var(--border, #334155);
-      background: var(--secondary, #0f172a);
+      background: var(--surface-alt);
       color: var(--text, #e5e7eb);
       border-radius: 14px;
       padding: 12px 10px;
@@ -731,7 +749,7 @@ async def handle_index(request: web.Request) -> web.Response:
       display: none;
       position: fixed;
       inset: 0;
-      background: rgba(2, 6, 23, 0.82);
+      background: var(--modal-overlay);
       z-index: 120;
       padding: 16px;
       overflow-y: auto;
@@ -740,7 +758,7 @@ async def handle_index(request: web.Request) -> web.Response:
     .tariffs-modal-card {
       max-width: 640px;
       margin: 20px auto 100px auto;
-      background: var(--bg, #0f172a);
+      background: var(--surface);
       border: 1px solid var(--border, #334155);
       border-radius: 18px;
       padding: 16px;
@@ -754,7 +772,7 @@ async def handle_index(request: web.Request) -> web.Response:
     }
     .modal-close {
       border: 1px solid var(--border, #334155);
-      background: var(--secondary, #1e293b);
+      background: var(--surface-alt);
       color: var(--text, #e5e7eb);
       border-radius: 12px;
       padding: 8px 12px;
@@ -762,7 +780,7 @@ async def handle_index(request: web.Request) -> web.Response:
     }
     .tariffs { display: flex; flex-direction: column; gap: 12px; margin-bottom: 24px; }
     .tariff-card {
-      background: var(--card-bg, #1e293b);
+      background: var(--surface);
       border-radius: 16px;
       padding: 16px;
       border: 1px solid var(--border, #334155);
@@ -786,7 +804,7 @@ async def handle_index(request: web.Request) -> web.Response:
     .tariff-card .hint { font-size: 12px; color: var(--hint, #94a3b8); margin-top: 8px; }
     .configs { display: flex; flex-direction: column; gap: 12px; }
     .config-card {
-      background: var(--card-bg, #1e293b);
+      background: var(--surface);
       border-radius: 12px;
       padding: 14px;
       border: 1px solid var(--border, #334155);
@@ -800,11 +818,11 @@ async def handle_index(request: web.Request) -> web.Response:
       gap: 12px;
       padding: 10px 12px;
       border-radius: 10px;
-      background: rgba(15, 23, 42, 0.55);
-      border: 1px solid rgba(148, 163, 184, 0.14);
+      background: var(--surface-soft);
+      border: 1px solid var(--surface-soft-border);
     }
-    .config-card .detail-label { font-size: 12px; color: #cbd5e1; }
-    .config-card .detail-value { font-size: 13px; font-weight: 700; color: #f8fafc; }
+    .config-card .detail-label { font-size: 12px; color: var(--hint, #94a3b8); }
+    .config-card .detail-value { font-size: 13px; font-weight: 700; color: var(--text, #f8fafc); }
     .config-card .config-preview { font-size: 11px; color: var(--hint); word-break: break-all; max-height: 40px; overflow: hidden; }
     .config-card .actions { margin-top: 10px; display: flex; gap: 8px; }
     .config-card .actions button {
@@ -815,16 +833,17 @@ async def handle_index(request: web.Request) -> web.Response:
       cursor: pointer;
       font-size: 13px;
       font-weight: 500;
-      background: var(--secondary, #334155);
+      background: var(--surface-alt);
       color: var(--text, #e5e7eb);
     }
     .config-card .actions button.primary { background: var(--button, #5288c1); color: var(--button-text, #fff); }
     .wallet-card {
-      background: linear-gradient(135deg, #083344, #052e16);
+      background: linear-gradient(135deg, var(--wallet-start), var(--wallet-end));
       border: 1px solid rgba(56, 189, 248, 0.18);
       border-radius: 18px;
       padding: 18px;
       margin-bottom: 18px;
+      color: var(--summary-text);
     }
     .wallet-card .value { font-size: 34px; font-weight: 700; margin-top: 10px; }
     .wallet-note { color: var(--hint, #94a3b8); font-size: 13px; margin-bottom: 14px; }
@@ -837,13 +856,13 @@ async def handle_index(request: web.Request) -> web.Response:
       gap: 12px;
       padding: 14px;
       border-radius: 14px;
-      background: var(--card-bg, #1e293b);
+      background: var(--surface);
       border: 1px solid var(--border, #334155);
     }
     .history-item .meta { font-size: 12px; color: var(--hint, #94a3b8); margin-top: 4px; }
     .history-item .amount { font-size: 15px; font-weight: 700; }
     .empty { text-align: center; color: var(--hint); font-size: 14px; padding: 24px; }
-    .toast { position: fixed; bottom: 24px; left: 16px; right: 16px; background: var(--card-bg); border-radius: 12px; padding: 12px 16px; text-align: center; font-size: 14px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); z-index: 100; display: none; }
+    .toast { position: fixed; bottom: 96px; left: 16px; right: 16px; background: var(--surface); border-radius: 12px; padding: 12px 16px; text-align: center; font-size: 14px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); z-index: 180; display: none; }
     .toast.show { display: block; }
     .loading { opacity: 0.7; pointer-events: none; }
     .bottom-tabs {
@@ -855,7 +874,7 @@ async def handle_index(request: web.Request) -> web.Response:
       grid-template-columns: 1fr 1fr;
       gap: 0;
       padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px));
-      background: rgba(2, 6, 23, 0.95);
+      background: var(--tabbar-bg);
       border-top: 1px solid var(--border, #334155);
       backdrop-filter: blur(10px);
     }
@@ -877,7 +896,7 @@ async def handle_index(request: web.Request) -> web.Response:
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
-  <div class="header">raccaster_vpn</div>
+  <div class="header">Raccaster VPN</div>
   <div id="admin-link-wrap" style="display:none; margin-bottom: 16px;">
     <a href="/admin" id="admin-link" style="display:inline-block; padding: 10px 16px; background: var(--secondary, #334155); color: var(--hint, #94a3b8); border-radius: 12px; text-decoration: none; font-size: 14px;">⚙ Админ-панель</a>
   </div>
@@ -928,11 +947,11 @@ async def handle_index(request: web.Request) -> web.Response:
       <div class="wallet-note" id="wallet-rate-note">Пополните VPN-баланс и оплатите тариф Stars напрямую внутри Telegram.</div>
       <div class="topup-grid">
         <button type="button" class="topup-btn" data-stars="1">1 ⭐</button>
-        <button type="button" class="topup-btn" data-stars="55">55 ⭐ · 100 ₽</button>
-        <button type="button" class="topup-btn" data-stars="100">100 ⭐ · 182 ₽</button>
-        <button type="button" class="topup-btn" data-stars="140">140 ⭐ · 255 ₽</button>
-        <button type="button" class="topup-btn" data-stars="250">250 ⭐ · 6 мес.</button>
-        <button type="button" class="topup-btn" data-stars="500">500 ⭐ · 12 мес.</button>
+        <button type="button" class="topup-btn" data-stars="55">55 ⭐</button>
+        <button type="button" class="topup-btn" data-stars="100">100 ⭐</button>
+        <button type="button" class="topup-btn" data-stars="140">140 ⭐</button>
+        <button type="button" class="topup-btn" data-stars="250">250 ⭐</button>
+        <button type="button" class="topup-btn" data-stars="500">500 ⭐</button>
       </div>
     </div>
 
@@ -950,6 +969,40 @@ async def handle_index(request: web.Request) -> web.Response:
 
   <script>
     const tg = window.Telegram && window.Telegram.WebApp;
+
+    function parseHexColor(value) {
+      if (!value || typeof value !== "string") return null;
+      var hex = value.trim();
+      if (!hex) return null;
+      if (hex[0] === "#") hex = hex.slice(1);
+      if (hex.length === 3) hex = hex.split("").map(function(ch) { return ch + ch; }).join("");
+      if (hex.length !== 6) return null;
+      var num = parseInt(hex, 16);
+      if (isNaN(num)) return null;
+      return {
+        r: (num >> 16) & 255,
+        g: (num >> 8) & 255,
+        b: num & 255
+      };
+    }
+
+    function mixColor(colorA, colorB, ratio) {
+      var a = parseHexColor(colorA);
+      var b = parseHexColor(colorB);
+      if (!a || !b) return colorA || colorB || "#ffffff";
+      var t = Math.max(0, Math.min(1, ratio));
+      var r = Math.round(a.r + (b.r - a.r) * t);
+      var g = Math.round(a.g + (b.g - a.g) * t);
+      var bCh = Math.round(a.b + (b.b - a.b) * t);
+      return "#" + [r, g, bCh].map(function(v) { return v.toString(16).padStart(2, "0"); }).join("");
+    }
+
+    function luminance(color) {
+      var rgb = parseHexColor(color);
+      if (!rgb) return 0;
+      return (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255;
+    }
+
     if (tg) {
       tg.expand();
       tg.MainButton.hide();
@@ -959,7 +1012,34 @@ async def handle_index(request: web.Request) -> web.Response:
       if (th.hint_color) document.documentElement.style.setProperty("--hint", th.hint_color);
       if (th.button_color) document.documentElement.style.setProperty("--button", th.button_color);
       if (th.button_text_color) document.documentElement.style.setProperty("--button-text", th.button_text_color);
-      if (th.secondary_bg_color) document.documentElement.style.setProperty("--card-bg", th.secondary_bg_color);
+      if (th.secondary_bg_color) {
+        document.documentElement.style.setProperty("--card-bg", th.secondary_bg_color);
+        document.documentElement.style.setProperty("--surface", th.secondary_bg_color);
+      }
+      var bg = th.bg_color || "#0f172a";
+      var secondary = th.secondary_bg_color || mixColor(bg, "#ffffff", 0.08);
+      var isLight = luminance(bg) > 0.72;
+      if (isLight) {
+        document.documentElement.style.setProperty("--surface", secondary);
+        document.documentElement.style.setProperty("--surface-alt", mixColor(bg, "#dbe4f0", 0.35));
+        document.documentElement.style.setProperty("--surface-soft", mixColor(bg, "#dbe4f0", 0.42));
+        document.documentElement.style.setProperty("--surface-soft-border", "rgba(100, 116, 139, 0.18)");
+        document.documentElement.style.setProperty("--modal-overlay", "rgba(15, 23, 42, 0.28)");
+        document.documentElement.style.setProperty("--tabbar-bg", "rgba(248, 250, 252, 0.94)");
+        document.documentElement.style.setProperty("--summary-start", mixColor(bg, "#8b5cf6", 0.16));
+        document.documentElement.style.setProperty("--summary-end", mixColor(bg, "#0ea5e9", 0.16));
+        document.documentElement.style.setProperty("--summary-text", th.text_color || "#0f172a");
+        document.documentElement.style.setProperty("--summary-muted", mixColor(th.text_color || "#0f172a", "#ffffff", 0.35));
+        document.documentElement.style.setProperty("--wallet-start", mixColor(bg, "#14b8a6", 0.12));
+        document.documentElement.style.setProperty("--wallet-end", mixColor(bg, "#22c55e", 0.12));
+      } else {
+        document.documentElement.style.setProperty("--surface", secondary);
+        document.documentElement.style.setProperty("--surface-alt", mixColor(bg, "#020617", 0.35));
+        document.documentElement.style.setProperty("--surface-soft", "rgba(15, 23, 42, 0.55)");
+        document.documentElement.style.setProperty("--surface-soft-border", "rgba(148, 163, 184, 0.14)");
+        document.documentElement.style.setProperty("--modal-overlay", "rgba(2, 6, 23, 0.82)");
+        document.documentElement.style.setProperty("--tabbar-bg", "rgba(2, 6, 23, 0.95)");
+      }
     }
 
     const user = tg && tg.initDataUnsafe && tg.initDataUnsafe.user;
@@ -1028,13 +1108,30 @@ async def handle_index(request: web.Request) -> web.Response:
         : "Нет активных устройств";
     }
 
+    function tariffRubLabel(tariff) {
+      var byMonths = {
+        1: "100 ₽",
+        2: "182 ₽",
+        3: "255 ₽",
+        6: "455 ₽",
+        12: "909 ₽"
+      };
+      var months = parseInt(tariff.months, 10);
+      return byMonths[months] || "";
+    }
+
+    function tariffTitle(tariff) {
+      var rub = tariffRubLabel(tariff);
+      return rub ? (tariff.name + " · " + rub) : tariff.name;
+    }
+
     function renderTariffs(tariffs) {
       const root = document.getElementById("tariffs");
       root.innerHTML = tariffs.map(function(t) {
         const badge = t.badge ? '<span class="badge">' + t.badge + '</span>' : '';
         const buttonLabel = tariffsModalMode === "renew" ? "Продлить" : "Купить";
         return '<div class="tariff-card">' +
-          '<div class="name">' + t.name + '</div>' +
+          '<div class="name">' + tariffTitle(t) + '</div>' +
           '<div class="meta">' + (t.duration_label || t.name) + ' · ' + t.traffic_gb + ' GB трафика</div>' +
           '<div class="price">' + t.price_stars + ' ⭐' + badge + '</div>' +
           '<button type="button" data-tariff-id="' + t.id + '">' + buttonLabel + '</button>' +
