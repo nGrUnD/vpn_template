@@ -12,6 +12,8 @@ import httpx
 
 from .config import ThreeXUIConfig
 
+DEFAULT_IP_LIMIT = 3
+
 
 @dataclass
 class ThreeXUIClientInfo:
@@ -39,6 +41,7 @@ class ThreeXUIClient:
         self._config = config
         self._client = httpx.AsyncClient(base_url=config.base_url, timeout=15.0)
         self._auth_cookies: dict[str, str] = {}
+        self._client_ips_path_template: str | bool | None = None
 
     async def _ensure_login(self) -> None:
         """
@@ -63,6 +66,7 @@ class ThreeXUIClient:
         expire_days: int = 1,
         total_gb: int = 3,
         remark: str | None = None,
+        limit_ip: int = DEFAULT_IP_LIMIT,
     ) -> ThreeXUIClientInfo:
         """
         Create new VLESS client on 3x-ui (for inbound ID=1) and
@@ -93,7 +97,7 @@ class ThreeXUIClient:
             "password": "",
             "flow": "",
             "email": client_email,
-            "limitIp": 0,
+            "limitIp": max(int(limit_ip), 0),
             "totalGB": total_bytes,
             "expiryTime": expiry_ts_ms,
             "enable": True,
@@ -155,6 +159,134 @@ class ThreeXUIClient:
         settings = json.loads(settings_raw) if isinstance(settings_raw, str) else (settings_raw or {})
         clients = settings.get("clients") or []
         return clients if isinstance(clients, list) else []
+
+    def _extract_payload(self, data: Any) -> Any:
+        if isinstance(data, dict):
+            if data.get("obj") is not None:
+                return data.get("obj")
+            if data.get("data") is not None:
+                return data.get("data")
+        return data
+
+    def _parse_client_ips_payload(self, payload: Any) -> dict[str, Any]:
+        unique_ips: list[str] = []
+
+        def add_ip(value: Any) -> None:
+            if value is None:
+                return
+            ip = str(value).strip()
+            if not ip or ip in unique_ips:
+                return
+            unique_ips.append(ip)
+
+        def walk(value: Any) -> None:
+            if value is None:
+                return
+            if isinstance(value, str):
+                stripped = value.strip()
+                if not stripped:
+                    return
+                if "," in stripped:
+                    for part in stripped.split(","):
+                        add_ip(part)
+                    return
+                add_ip(stripped)
+                return
+            if isinstance(value, list):
+                for item in value:
+                    walk(item)
+                return
+            if isinstance(value, dict):
+                preferred_keys = (
+                    "ip",
+                    "address",
+                    "clientIp",
+                    "client_ip",
+                    "remoteAddr",
+                    "remote_addr",
+                )
+                for key in preferred_keys:
+                    if value.get(key):
+                        add_ip(value.get(key))
+                if unique_ips:
+                    return
+                for key, item in value.items():
+                    lowered = str(key).lower()
+                    if lowered in {"createdat", "updatedat", "lastseen", "time", "email"}:
+                        continue
+                    if isinstance(item, (dict, list)):
+                        walk(item)
+                    else:
+                        add_ip(key)
+                return
+
+        walk(payload)
+        return {
+            "available": True,
+            "ips": unique_ips,
+            "ip_count": len(unique_ips),
+        }
+
+    async def get_client_ips(self, inbound_id: int, client_uuid: str) -> dict[str, Any]:
+        """
+        Получить список IP клиента из 3x-ui, если версия панели поддерживает API clientIps.
+        Возвращает graceful fallback с available=False, если API отсутствует.
+        """
+        await self._ensure_login()
+        inbound = await self._get_inbound(inbound_id)
+        if not inbound:
+            return {"available": False, "ips": [], "ip_count": 0}
+        clients = self._extract_clients(inbound)
+        target = next((client for client in clients if client.get("id") == client_uuid), None)
+        if not target:
+            return {"available": False, "ips": [], "ip_count": 0}
+
+        identifiers: list[str] = []
+        for candidate in (target.get("email"), client_uuid):
+            normalized = str(candidate or "").strip()
+            if normalized and normalized not in identifiers:
+                identifiers.append(normalized)
+        if not identifiers:
+            return {"available": False, "ips": [], "ip_count": 0}
+
+        def build_candidate_paths(identifier: str) -> list[str]:
+            encoded = urllib.parse.quote(identifier, safe="")
+            if isinstance(self._client_ips_path_template, str):
+                return [self._client_ips_path_template.format(identifier=encoded, inbound_id=inbound_id)]
+            return [
+                f"/panel/api/inbounds/clientIps/{encoded}",
+                f"/panel/api/inbounds/clientIps/{inbound_id}/{encoded}",
+                f"/panel/api/inbounds/clientIps/{encoded}?inboundId={inbound_id}",
+                f"/panel/api/inbounds/clientIps/{encoded}?inbound_id={inbound_id}",
+                f"/panel/api/inbounds/clientIps/{encoded}?id={inbound_id}",
+            ]
+
+        saw_supported_response = False
+        for identifier in identifiers:
+            for path in build_candidate_paths(identifier):
+                try:
+                    response = await self._client.get(path, cookies=self._auth_cookies)
+                    if response.status_code == 404:
+                        continue
+                    response.raise_for_status()
+                    data = response.json()
+                    saw_supported_response = True
+                    if isinstance(self._client_ips_path_template, bool):
+                        self._client_ips_path_template = None
+                    if not isinstance(self._client_ips_path_template, str):
+                        path_template = path.replace(
+                            urllib.parse.quote(identifier, safe=""),
+                            "{identifier}",
+                        ).replace(str(inbound_id), "{inbound_id}", 1)
+                        self._client_ips_path_template = path_template
+                    payload = self._extract_payload(data)
+                    return self._parse_client_ips_payload(payload)
+                except Exception:
+                    continue
+
+        if not saw_supported_response and self._client_ips_path_template is None:
+            self._client_ips_path_template = False
+        return {"available": False, "ips": [], "ip_count": 0}
 
     async def get_client_traffic(self, inbound_id: int, client_uuid: str) -> Optional[dict[str, Any]]:
         """
@@ -357,6 +489,7 @@ class ThreeXUIClient:
         else:
             target["totalGB"] = current_total + add_bytes
         target["enable"] = True
+        target["limitIp"] = DEFAULT_IP_LIMIT
 
         payload_obj = {"id": inbound_id, "settings": {"clients": [target]}}
         response = await self._client.post(

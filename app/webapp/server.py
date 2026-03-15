@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 from html import escape
 from typing import Any, Dict, List
@@ -603,7 +604,13 @@ async def _admin_fetch_payments_data(limit: int = 50, q: str = "", status: str =
     }
 
 
-async def _admin_fetch_devices_data(limit: int = 50, q: str = "", status: str = "", os_name: str = "") -> Dict[str, Any]:
+async def _admin_fetch_devices_data(
+    limit: int = 50,
+    q: str = "",
+    status: str = "",
+    os_name: str = "",
+    threexui: ThreeXUIClient | None = None,
+) -> Dict[str, Any]:
     pool = await get_pool()
     filters: List[str] = []
     params: List[Any] = []
@@ -666,6 +673,31 @@ async def _admin_fetch_devices_data(limit: int = 50, q: str = "", status: str = 
             *params,
             limit,
         )
+    row_dicts = [dict(row) for row in rows]
+
+    async def enrich_row(row: Dict[str, Any]) -> None:
+        row["ip_limit"] = 3
+        row["share_available"] = False
+        row["share_ip_count"] = 0
+        row["share_ips"] = []
+        row["share_warning"] = False
+        if not threexui or not row.get("threexui_client_id"):
+            return
+        try:
+            ip_info = await threexui.get_client_ips(1, str(row["threexui_client_id"]))
+        except Exception:
+            return
+        row["share_available"] = bool(ip_info.get("available"))
+        row["share_ip_count"] = int(ip_info.get("ip_count") or 0)
+        row["share_ips"] = list(ip_info.get("ips") or [])[:5]
+        row["share_warning"] = row["share_ip_count"] > int(row["ip_limit"])
+
+    if row_dicts and threexui:
+        await asyncio.gather(*(enrich_row(row) for row in row_dicts))
+
+    suspicious_devices = sum(1 for row in row_dicts if row.get("share_warning"))
+    share_data_ready = any(row.get("share_available") for row in row_dicts)
+
     return {
         "stats": {
             "total_devices": int(stats["total_devices"] or 0),
@@ -674,8 +706,10 @@ async def _admin_fetch_devices_data(limit: int = 50, q: str = "", status: str = 
             "expired_devices": int(stats["expired_devices"] or 0),
             "expiring_soon": int(stats["expiring_soon"] or 0),
             "users_with_devices": int(stats["users_with_devices"] or 0),
+            "suspicious_devices": suspicious_devices,
+            "share_data_ready": share_data_ready,
         },
-        "rows": list(rows),
+        "rows": row_dicts,
     }
 
 
@@ -1071,6 +1105,20 @@ def _admin_device_row_html(row: Dict[str, Any], *, redirect_query: str = "") -> 
     status_class = "active" if is_live else "inactive"
     expires_text = expires_at.strftime("%d.%m.%Y") if expires_at else "—"
     redirect_input = f'<input type="hidden" name="redirect" value="{escape(redirect_query)}" />' if redirect_query else ""
+    share_ips = ", ".join(str(ip) for ip in (row.get("share_ips") or [])[:3])
+    if row.get("share_available"):
+        share_count = int(row.get("share_ip_count") or 0)
+        ip_limit = int(row.get("ip_limit") or 3)
+        if row.get("share_warning"):
+            share_html = f'<span class="badge promo">Шаринг? {share_count} IP</span>'
+        elif share_count > 0:
+            share_html = f'<span class="badge active">{share_count} IP / лимит {ip_limit}</span>'
+        else:
+            share_html = '<span class="badge inactive">IP не замечены</span>'
+        if share_ips:
+            share_html += f'<br><span style="color:#94a3b8;font-size:12px;">{escape(share_ips)}</span>'
+    else:
+        share_html = '<span class="badge inactive">IP API недоступно</span>'
     return (
         "<tr>"
         f"<td>{row['id']}</td>"
@@ -1081,6 +1129,7 @@ def _admin_device_row_html(row: Dict[str, Any], *, redirect_query: str = "") -> 
         f"<td>{int(row.get('traffic_gb') or 0)} GB</td>"
         f"<td>{expires_text}</td>"
         f"<td><span class=\"badge {status_class}\">{status_text}</span></td>"
+        f"<td>{share_html}</td>"
         "<td><div class=\"cell-actions\">"
         f"<a class=\"btn\" href=\"/admin/devices?q={row['telegram_id']}\">Все устройства</a>"
         f"<form method=\"post\" action=\"/admin/devices/{row['id']}/extend\" class=\"mini-form\">{redirect_input}<input type=\"number\" name=\"days\" min=\"1\" value=\"30\" /><button type=\"submit\" class=\"primary\">Продлить</button></form>"
@@ -1932,7 +1981,7 @@ def _admin_devices_html(data: Dict[str, Any], *, q: str = "", status: str = "", 
         for row in rows
     )
     if not rows_html:
-        rows_html = '<tr><td colspan="9">Устройств пока нет</td></tr>'
+        rows_html = '<tr><td colspan="10">Устройств пока нет</td></tr>'
     content_html = f"""
     <section class="card">
       <div class="card-title">Поиск и фильтры</div>
@@ -1968,6 +2017,11 @@ def _admin_devices_html(data: Dict[str, Any], *, q: str = "", status: str = "", 
         <div class="stat-value">{stats["users_with_devices"]}</div>
         <div class="stat-meta">Сколько пользователей имеют хотя бы одно устройство.</div>
       </div>
+      <div class="stat-card">
+        <div class="stat-label">Подозрение на шаринг</div>
+        <div class="stat-value">{stats["suspicious_devices"]}</div>
+        <div class="stat-meta">Устройств с числом замеченных IP выше лимита `3`.</div>
+      </div>
     </section>
     <section class="section-grid">
       <div class="card">
@@ -1978,6 +2032,7 @@ def _admin_devices_html(data: Dict[str, Any], *, q: str = "", status: str = "", 
           <li>Истекших подписок: {stats["expired_devices"]}</li>
           <li>Список сортируется по дате создания, сверху самые свежие устройства</li>
           <li>Можно использовать как основу для будущих действий: блокировка, ручное продление, поиск пользователя</li>
+          <li>{'IP-аналитика включена: видно историю IP и возможный шаринг.' if stats["share_data_ready"] else 'IP-аналитика недоступна в API текущей версии 3x-ui или пока не вернула данные.'}</li>
         </ul>
       </div>
       <div class="card">
@@ -2005,6 +2060,7 @@ def _admin_devices_html(data: Dict[str, Any], *, q: str = "", status: str = "", 
               <th>Трафик</th>
               <th>Действует до</th>
               <th>Статус</th>
+              <th>IP / шаринг</th>
               <th>Действия</th>
             </tr>
           </thead>
@@ -2434,7 +2490,7 @@ async def handle_admin_devices_index(request: web.Request) -> web.Response:
     os_name = (request.query.get("os") or "").strip()
     return web.Response(
         text=_admin_devices_html(
-            await _admin_fetch_devices_data(q=q, status=status, os_name=os_name),
+            await _admin_fetch_devices_data(q=q, status=status, os_name=os_name, threexui=request.app.get("threexui")),
             q=q,
             status=status,
             os_name=os_name,
