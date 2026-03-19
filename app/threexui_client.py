@@ -162,6 +162,7 @@ class ThreeXUIClient:
         total_gb: int = 3,
         remark: str | None = None,
         limit_ip: int = DEFAULT_IP_LIMIT,
+        inbound_id: int | None = None,
     ) -> ThreeXUIClientInfo:
         """
         Create new VLESS client on 3x-ui (for inbound ID=1) and
@@ -175,7 +176,7 @@ class ThreeXUIClient:
         await self._ensure_login()
 
         # ID инбаунда, который используем как основной для клиентов.
-        inbound_id = 1
+        inbound_id = int(inbound_id or getattr(self._config, "inbound_id", 1) or 1)
 
         # Время истечения в миллисекундах (3x-ui в JS использует new Date(expiryTime)).
         expiry_ts_ms = int((time.time() + expire_days * 24 * 60 * 60) * 1000)

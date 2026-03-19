@@ -10,6 +10,7 @@ from aiogram import Bot
 from aiogram.types import LabeledPrice
 
 from app.db import get_pool
+from app.services.backends import get_registry_client, pick_backend_for_new_subscription
 from app.services.subscriptions import (
     create_subscription_from_tariff,
     create_test_subscription,
@@ -37,6 +38,27 @@ from app.threexui_client import ThreeXUIClient
 
 def _admin_ids(app: web.Application) -> List[int]:
     return list(app.get("admin_ids", []))
+
+
+def _threexui_registry(app: web.Application) -> Dict[str, ThreeXUIClient]:
+    registry = app.get("threexui_registry") or {}
+    if registry:
+        return registry
+    default_key = _default_backend_key(app)
+    default_client = app.get("threexui")
+    return {default_key: default_client} if default_client else {}
+
+
+def _default_backend_key(app: web.Application) -> str:
+    return str(app.get("default_threexui_key") or "default")
+
+
+def _backend_configs(app: web.Application) -> Dict[str, Any]:
+    return dict(app.get("threexui_backends") or {})
+
+
+def _resolve_threexui_client(app: web.Application, backend_key: str | None = None) -> ThreeXUIClient:
+    return get_registry_client(_threexui_registry(app), backend_key, _default_backend_key(app))
 
 
 async def _create_stars_invoice_link(bot: Bot, *, title: str, description: str, payload: str, amount: int) -> str:
@@ -109,8 +131,12 @@ async def handle_my_configs(request: web.Request) -> web.Response:
     if not telegram_id:
         return web.json_response({"ok": False, "error": "telegram_id is required"}, status=400)
     telegram_id = int(telegram_id)
-    threexui = request.app.get("threexui")
-    rows = await get_active_subscriptions_by_telegram_id(telegram_id, threexui=threexui)
+    registry = _threexui_registry(request.app)
+    rows = await get_active_subscriptions_by_telegram_id(
+        telegram_id,
+        threexui_registry=registry,
+        default_backend_key=_default_backend_key(request.app),
+    )
     configs = []
 
     def format_gb(value: float) -> str:
@@ -119,11 +145,14 @@ async def handle_my_configs(request: web.Request) -> web.Response:
             return f"{int(rounded)} GB"
         return f"{rounded:.2f}".rstrip("0").rstrip(".") + " GB"
 
+    default_backend_key = _default_backend_key(request.app)
     for r in rows:
         traffic = None
-        if threexui and r.get("threexui_client_id"):
+        if registry and r.get("threexui_client_id"):
             try:
-                traffic = await threexui.get_client_traffic(1, r["threexui_client_id"])
+                threexui = get_registry_client(registry, r.get("backend_key"), default_backend_key)
+                inbound_id = int(r.get("backend_inbound_id") or 1)
+                traffic = await threexui.get_client_traffic(inbound_id, r["threexui_client_id"])
             except Exception:
                 traffic = None
         traffic_value = "Неизвестно"
@@ -144,6 +173,7 @@ async def handle_my_configs(request: web.Request) -> web.Response:
                 "sub_id": r.get("threexui_sub_id"),
                 "subscription_url": r.get("subscription_url"),
                 "subscription_json_url": r.get("subscription_json_url"),
+                "backend_key": r.get("backend_key"),
                 "device_os": r.get("device_os"),
                 "can_extend": bool(r.get("tariff_price_stars")) and bool(r.get("tariff_months")),
                 "renew_price_stars": r.get("tariff_price_stars"),
@@ -171,7 +201,11 @@ async def handle_dashboard(request: web.Request) -> web.Response:
         last_name=data.get("last_name"),
     )
     wallet = await get_wallet_summary(user["id"])
-    configs = await get_active_subscriptions_by_telegram_id(telegram_id, threexui=request.app.get("threexui"))
+    configs = await get_active_subscriptions_by_telegram_id(
+        telegram_id,
+        threexui_registry=_threexui_registry(request.app),
+        default_backend_key=_default_backend_key(request.app),
+    )
     return web.json_response(
         {
             "ok": True,
@@ -279,16 +313,24 @@ async def handle_purchase_tariff(request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": "Недостаточно средств", "balance": balance}, status=400)
 
     try:
+        backend_config = await pick_backend_for_new_subscription(
+            registry=_threexui_registry(request.app),
+            backend_configs=_backend_configs(request.app),
+            default_key=_default_backend_key(request.app),
+        )
+        threexui = _resolve_threexui_client(request.app, backend_config.key)
         subscription = await create_subscription_from_tariff(
             db_user_id=user["id"],
             telegram_id=telegram_id,
-            threexui=request.app["threexui"],
+            threexui=threexui,
             months=int(tariff["months"]),
             traffic_gb=int(tariff["traffic_gb"]),
             tariff_name=str(tariff["name"]),
             tariff_id=int(tariff["id"]),
             tariff_price_stars=int(tariff["price_stars"]),
             device_os=device_os,
+            backend_key=backend_config.key,
+            backend_inbound_id=backend_config.inbound_id,
         )
     except Exception:
         balance = await refund_purchase(user["id"], int(tariff["price_stars"]), f"Возврат за тариф «{tariff['name']}»")
@@ -304,6 +346,7 @@ async def handle_purchase_tariff(request: web.Request) -> web.Response:
                 "sub_id": subscription.get("threexui_sub_id"),
                 "subscription_url": subscription.get("subscription_url"),
                 "subscription_json_url": subscription.get("subscription_json_url"),
+                "backend_key": subscription.get("backend_key"),
                 "server_label": subscription["server_label"],
                 "expires_at": subscription["expires_at"].isoformat() if subscription["expires_at"] else None,
             },
@@ -355,14 +398,17 @@ async def handle_extend_subscription(request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": "Недостаточно средств", "balance": balance}, status=400)
 
     try:
+        backend_key = str(subscription_row.get("backend_key") or _default_backend_key(request.app))
+        backend_inbound_id = int(subscription_row.get("backend_inbound_id") or 1)
         subscription = await extend_subscription_for_user(
             subscription_id=subscription_id,
             telegram_id=telegram_id,
-            threexui=request.app["threexui"],
+            threexui=_resolve_threexui_client(request.app, backend_key),
             months=renew_months,
             traffic_gb=renew_traffic_gb,
             tariff_id=effective_tariff_id,
             tariff_price_stars=renew_price_stars,
+            backend_inbound_id=backend_inbound_id,
         )
     except Exception:
         subscription = None
@@ -384,7 +430,6 @@ async def handle_create_test_client(request: web.Request) -> web.Response:
     WebApp: создать тестовый VPN-клиент в 3x-ui и сохранить подписку в БД.
     JSON: { "telegram_id": 123456789, "username": "...", "first_name": "...", "last_name": "..." }
     """
-    threexui: ThreeXUIClient = request.app["threexui"]
     data: Dict[str, Any] = await request.json()
 
     telegram_id = int(data.get("telegram_id", 0))
@@ -397,10 +442,17 @@ async def handle_create_test_client(request: web.Request) -> web.Response:
         first_name=data.get("first_name"),
         last_name=data.get("last_name"),
     )
+    backend_config = await pick_backend_for_new_subscription(
+        registry=_threexui_registry(request.app),
+        backend_configs=_backend_configs(request.app),
+        default_key=_default_backend_key(request.app),
+    )
     subscription = await create_test_subscription(
         db_user_id=user["id"],
         telegram_id=telegram_id,
-        threexui=threexui,
+        threexui=_resolve_threexui_client(request.app, backend_config.key),
+        backend_key=backend_config.key,
+        backend_inbound_id=backend_config.inbound_id,
     )
 
     return web.json_response(
@@ -410,6 +462,7 @@ async def handle_create_test_client(request: web.Request) -> web.Response:
             "sub_id": subscription.get("threexui_sub_id"),
             "subscription_url": subscription.get("subscription_url"),
             "subscription_json_url": subscription.get("subscription_json_url"),
+            "backend_key": subscription.get("backend_key"),
             "remark": subscription["server_label"],
             "message": subscription["config"],
         }
@@ -618,7 +671,9 @@ async def _admin_fetch_devices_data(
     q: str = "",
     status: str = "",
     os_name: str = "",
-    threexui: ThreeXUIClient | None = None,
+    backend_key: str = "",
+    threexui_registry: Dict[str, ThreeXUIClient] | None = None,
+    default_backend_key: str = "default",
 ) -> Dict[str, Any]:
     pool = await get_pool()
     filters: List[str] = []
@@ -633,6 +688,9 @@ async def _admin_fetch_devices_data(
     if os_name:
         params.append(os_name)
         filters.append(f"s.device_os = ${len(params)}")
+    if backend_key:
+        params.append(backend_key)
+        filters.append(f"COALESCE(s.backend_key, 'default') = ${len(params)}")
     if status == "active":
         filters.append("s.is_active = TRUE AND (s.expires_at IS NULL OR s.expires_at > NOW())")
     elif status == "inactive":
@@ -661,6 +719,8 @@ async def _admin_fetch_devices_data(
                 s.id,
                 s.server_label,
                 s.threexui_client_id,
+                s.backend_key,
+                s.backend_inbound_id,
                 s.device_os,
                 s.is_active,
                 s.expires_at,
@@ -682,6 +742,16 @@ async def _admin_fetch_devices_data(
             *params,
             limit,
         )
+        backend_rows = await conn.fetch(
+            """
+            SELECT
+                COALESCE(backend_key, 'default') AS backend_key,
+                COUNT(*) AS total
+            FROM subscriptions
+            GROUP BY COALESCE(backend_key, 'default')
+            ORDER BY total DESC, backend_key ASC
+            """
+        )
     row_dicts = [dict(row) for row in rows]
 
     async def enrich_row(row: Dict[str, Any]) -> None:
@@ -690,10 +760,12 @@ async def _admin_fetch_devices_data(
         row["share_ip_count"] = 0
         row["share_ips"] = []
         row["share_warning"] = False
-        if not threexui or not row.get("threexui_client_id"):
+        if not threexui_registry or not row.get("threexui_client_id"):
             return
         try:
-            ip_info = await threexui.get_client_ips(1, str(row["threexui_client_id"]))
+            threexui = get_registry_client(threexui_registry, row.get("backend_key"), default_backend_key)
+            inbound_id = int(row.get("backend_inbound_id") or 1)
+            ip_info = await threexui.get_client_ips(inbound_id, str(row["threexui_client_id"]))
         except Exception:
             return
         row["share_available"] = bool(ip_info.get("available"))
@@ -701,7 +773,7 @@ async def _admin_fetch_devices_data(
         row["share_ips"] = list(ip_info.get("ips") or [])[:5]
         row["share_warning"] = row["share_ip_count"] > int(row["ip_limit"])
 
-    if row_dicts and threexui:
+    if row_dicts and threexui_registry:
         await asyncio.gather(*(enrich_row(row) for row in row_dicts))
 
     suspicious_devices = sum(1 for row in row_dicts if row.get("share_warning"))
@@ -719,6 +791,10 @@ async def _admin_fetch_devices_data(
             "share_data_ready": share_data_ready,
         },
         "rows": row_dicts,
+        "backend_breakdown": [
+            {"backend_key": str(row["backend_key"]), "total": int(row["total"] or 0)}
+            for row in backend_rows
+        ],
     }
 
 
@@ -732,6 +808,8 @@ async def _admin_get_subscription_row(subscription_id: int) -> Dict[str, Any] | 
                 s.user_id,
                 s.server_label,
                 s.threexui_client_id,
+                s.backend_key,
+                s.backend_inbound_id,
                 s.is_active,
                 s.expires_at,
                 u.telegram_id,
@@ -747,7 +825,13 @@ async def _admin_get_subscription_row(subscription_id: int) -> Dict[str, Any] | 
     return dict(row) if row else None
 
 
-async def _admin_extend_subscription_manual(*, subscription_id: int, days: int, threexui: ThreeXUIClient) -> bool:
+async def _admin_extend_subscription_manual(
+    *,
+    subscription_id: int,
+    days: int,
+    threexui_registry: Dict[str, ThreeXUIClient],
+    default_backend_key: str,
+) -> bool:
     row = await _admin_get_subscription_row(subscription_id)
     if not row or not row.get("threexui_client_id") or days <= 0:
         return False
@@ -755,8 +839,9 @@ async def _admin_extend_subscription_manual(*, subscription_id: int, days: int, 
     tariff_traffic = int(row.get("tariff_traffic_gb") or 0)
     period_days = max(tariff_months * 30, 1)
     add_traffic_gb = max(1, round(tariff_traffic * days / period_days)) if tariff_traffic > 0 else 1
+    threexui = get_registry_client(threexui_registry, row.get("backend_key"), default_backend_key)
     updated = await threexui.extend_client(
-        1,
+        int(row.get("backend_inbound_id") or 1),
         str(row["threexui_client_id"]),
         add_days=days,
         add_total_gb=add_traffic_gb,
@@ -1132,6 +1217,7 @@ def _admin_device_row_html(row: Dict[str, Any], *, redirect_query: str = "") -> 
         "<tr>"
         f"<td>{row['id']}</td>"
         f"<td>{_admin_person_label(row)}<br><span style=\"color:#94a3b8;font-size:12px;\">TG {row['telegram_id']}</span></td>"
+        f"<td>{escape(str(row.get('backend_key') or 'default'))}</td>"
         f"<td>{escape(str(row.get('device_os') or '—'))}</td>"
         f"<td>{escape(str(row.get('server_label') or '—'))}</td>"
         f"<td>{int(row.get('price_stars') or 0)} ⭐</td>"
@@ -1493,7 +1579,7 @@ def _admin_layout(*, title: str, subtitle: str, active_tab: str, content_html: s
     .inline-form { display: inline; margin: 0; }
     .toolbar-form {
       display: grid;
-      grid-template-columns: 1.4fr repeat(3, minmax(0, 1fr));
+      grid-template-columns: 1.4fr repeat(4, minmax(0, 1fr));
       gap: 12px;
       align-items: end;
     }
@@ -1972,14 +2058,29 @@ def _admin_payments_html(data: Dict[str, Any], *, q: str = "", status: str = "",
     )
 
 
-def _admin_devices_html(data: Dict[str, Any], *, q: str = "", status: str = "", os_name: str = "", redirect_query: str = "", notice_html: str = "") -> str:
+def _admin_devices_html(
+    data: Dict[str, Any],
+    *,
+    q: str = "",
+    status: str = "",
+    os_name: str = "",
+    backend_key: str = "",
+    redirect_query: str = "",
+    notice_html: str = "",
+) -> str:
     stats = data["stats"]
     rows = data["rows"]
+    backend_breakdown = data.get("backend_breakdown") or []
     q_value = escape(q)
     os_all = "selected" if not os_name else ""
     os_windows = "selected" if os_name == "Windows" else ""
     os_ios = "selected" if os_name == "iOS" else ""
     os_android = "selected" if os_name == "Android" else ""
+    backend_all = "selected" if not backend_key else ""
+    backend_options_html = "".join(
+        f'<option value="{escape(str(item["backend_key"]))}" {"selected" if backend_key == str(item["backend_key"]) else ""}>{escape(str(item["backend_key"]))}</option>'
+        for item in backend_breakdown
+    )
     status_all = "selected" if not status else ""
     status_active = "selected" if status == "active" else ""
     status_inactive = "selected" if status == "inactive" else ""
@@ -1990,7 +2091,11 @@ def _admin_devices_html(data: Dict[str, Any], *, q: str = "", status: str = "", 
         for row in rows
     )
     if not rows_html:
-        rows_html = '<tr><td colspan="10">Устройств пока нет</td></tr>'
+        rows_html = '<tr><td colspan="11">Устройств пока нет</td></tr>'
+    backend_breakdown_text = ", ".join(
+        f'{item["backend_key"]}: {item["total"]}'
+        for item in backend_breakdown[:6]
+    ) or "Пока только один backend или устройств ещё нет."
     content_html = f"""
     <section class="card">
       <div class="card-title">Поиск и фильтры</div>
@@ -2000,6 +2105,7 @@ def _admin_devices_html(data: Dict[str, Any], *, q: str = "", status: str = "", 
           <div class="form-row"><label>Поиск</label><input type="text" name="q" value="{q_value}" placeholder="123456789, @user, iOS 2" /></div>
           <div class="form-row"><label>Статус</label><select name="status"><option value="" {status_all}>Все</option><option value="active" {status_active}>Активные</option><option value="inactive" {status_inactive}>Неактивные</option><option value="expired" {status_expired}>Истекшие</option><option value="expiring" {status_expiring}>Истекают скоро</option></select></div>
           <div class="form-row"><label>Платформа</label><select name="os"><option value="" {os_all}>Все</option><option value="Windows" {os_windows}>Windows</option><option value="iOS" {os_ios}>iOS</option><option value="Android" {os_android}>Android</option></select></div>
+          <div class="form-row"><label>Backend</label><select name="backend"><option value="" {backend_all}>Все</option>{backend_options_html}</select></div>
           <div class="form-row"><label>Действие</label><button type="submit" class="primary">Применить</button></div>
         </div>
         <div class="toolbar-actions"><a class="btn" href="/admin/devices">Сбросить фильтры</a></div>
@@ -2031,6 +2137,11 @@ def _admin_devices_html(data: Dict[str, Any], *, q: str = "", status: str = "", 
         <div class="stat-value">{stats["suspicious_devices"]}</div>
         <div class="stat-meta">Устройств с числом замеченных IP выше лимита `3`.</div>
       </div>
+      <div class="stat-card">
+        <div class="stat-label">Backend-ов</div>
+        <div class="stat-value">{len(backend_breakdown)}</div>
+        <div class="stat-meta">Сколько серверов уже участвуют в распределении устройств.</div>
+      </div>
     </section>
     <section class="section-grid">
       <div class="card">
@@ -2041,6 +2152,7 @@ def _admin_devices_html(data: Dict[str, Any], *, q: str = "", status: str = "", 
           <li>Истекших подписок: {stats["expired_devices"]}</li>
           <li>Список сортируется по дате создания, сверху самые свежие устройства</li>
           <li>Можно использовать как основу для будущих действий: блокировка, ручное продление, поиск пользователя</li>
+          <li>Распределение по backend: {escape(backend_breakdown_text)}</li>
           <li>{'IP-аналитика включена: видно историю IP и возможный шаринг.' if stats["share_data_ready"] else 'IP-аналитика недоступна в API текущей версии 3x-ui или пока не вернула данные.'}</li>
         </ul>
       </div>
@@ -2063,6 +2175,7 @@ def _admin_devices_html(data: Dict[str, Any], *, q: str = "", status: str = "", 
             <tr>
               <th>ID</th>
               <th>Пользователь</th>
+              <th>Backend</th>
               <th>Платформа</th>
               <th>Название</th>
               <th>Цена</th>
@@ -2497,12 +2610,21 @@ async def handle_admin_devices_index(request: web.Request) -> web.Response:
     q = (request.query.get("q") or "").strip()
     status = (request.query.get("status") or "").strip()
     os_name = (request.query.get("os") or "").strip()
+    backend_key = (request.query.get("backend") or "").strip()
     return web.Response(
         text=_admin_devices_html(
-            await _admin_fetch_devices_data(q=q, status=status, os_name=os_name, threexui=request.app.get("threexui")),
+            await _admin_fetch_devices_data(
+                q=q,
+                status=status,
+                os_name=os_name,
+                backend_key=backend_key,
+                threexui_registry=_threexui_registry(request.app),
+                default_backend_key=_default_backend_key(request.app),
+            ),
             q=q,
             status=status,
             os_name=os_name,
+            backend_key=backend_key,
             redirect_query=request.query_string,
             notice_html=_admin_notice_html(status=request.query.get("status"), error=request.query.get("error")),
         ),
@@ -2596,7 +2718,8 @@ async def handle_admin_device_extend(request: web.Request) -> web.Response:
         ok = await _admin_extend_subscription_manual(
             subscription_id=subscription_id,
             days=days,
-            threexui=request.app["threexui"],
+            threexui_registry=_threexui_registry(request.app),
+            default_backend_key=_default_backend_key(request.app),
         )
     except Exception:
         ok = False
@@ -3984,11 +4107,17 @@ async def handle_index(request: web.Request) -> web.Response:
 
 def create_web_app(
     threexui: ThreeXUIClient,
+    threexui_registry: Dict[str, ThreeXUIClient] | None = None,
+    threexui_backends: Dict[str, Any] | None = None,
+    default_threexui_key: str = "default",
     admin_ids: List[int] | None = None,
     bot: Bot | None = None,
 ) -> web.Application:
     app = web.Application()
     app["threexui"] = threexui
+    app["threexui_registry"] = threexui_registry or {default_threexui_key: threexui}
+    app["threexui_backends"] = threexui_backends or {}
+    app["default_threexui_key"] = default_threexui_key
     app["admin_ids"] = admin_ids or []
     app["bot"] = bot
     app.router.add_get("/health", handle_health)

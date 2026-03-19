@@ -138,6 +138,37 @@ async def init_db(db_config: DatabaseConfig) -> None:
             ADD COLUMN IF NOT EXISTS subscription_json_url TEXT;
             """
         )
+        await conn.execute(
+            """
+            ALTER TABLE subscriptions
+            ADD COLUMN IF NOT EXISTS backend_key TEXT;
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE subscriptions
+            ADD COLUMN IF NOT EXISTS backend_inbound_id INT;
+            """
+        )
+        await conn.execute(
+            """
+            UPDATE subscriptions
+            SET backend_key = 'default'
+            WHERE backend_key IS NULL OR backend_key = '';
+            """
+        )
+        await conn.execute(
+            """
+            UPDATE subscriptions
+            SET backend_inbound_id = 1
+            WHERE backend_inbound_id IS NULL OR backend_inbound_id <= 0;
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_subscriptions_backend_key ON subscriptions(backend_key);
+            """
+        )
 
         await conn.execute(
             """

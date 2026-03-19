@@ -6,10 +6,8 @@ from typing import Optional
 import asyncpg
 
 from app.db import get_pool
+from app.services.backends import get_registry_client
 from app.threexui_client import ThreeXUIClient, ThreeXUIClientInfo
-
-
-INBOUND_ID_FOR_SYNC = 1
 
 
 def _resolve_duration_days(months: int | None, tariff_name: str | None) -> int:
@@ -51,11 +49,12 @@ async def _next_device_sequence(db_user_id: int, device_os: str | None) -> int:
 
 async def get_active_subscriptions_by_telegram_id(
     telegram_id: int,
-    threexui: ThreeXUIClient | None = None,
+    threexui_registry: dict[str, ThreeXUIClient] | None = None,
+    default_backend_key: str = "default",
 ) -> list[asyncpg.Record]:
     """
     Список активных подписок пользователя.
-    Если передан threexui, перед возвратом синхронизирует с панелью:
+    Если передан registry 3x-ui, перед возвратом синхронизирует с панелью:
     подписки, у которых клиент удалён в 3x-ui, помечаются is_active=FALSE.
     """
     pool = await get_pool()
@@ -69,6 +68,8 @@ async def get_active_subscriptions_by_telegram_id(
                 s.threexui_sub_id,
                 s.subscription_url,
                 s.subscription_json_url,
+                s.backend_key,
+                s.backend_inbound_id,
                 s.config,
                 s.device_os,
                 COALESCE(s.tariff_id, t.id) AS tariff_id,
@@ -87,11 +88,14 @@ async def get_active_subscriptions_by_telegram_id(
             telegram_id,
         )
         rows = list(rows)
-        if threexui and rows:
+        if threexui_registry and rows:
             still_active = []
             for r in rows:
                 client_id = r.get("threexui_client_id")
-                if client_id and not await threexui.client_exists(INBOUND_ID_FOR_SYNC, client_id):
+                backend_key = str(r.get("backend_key") or default_backend_key)
+                inbound_id = int(r.get("backend_inbound_id") or 1)
+                threexui = get_registry_client(threexui_registry, backend_key, default_backend_key)
+                if client_id and not await threexui.client_exists(inbound_id, client_id):
                     await conn.execute("UPDATE subscriptions SET is_active = FALSE WHERE id = $1", r["id"])
                 else:
                     still_active.append(r)
@@ -103,6 +107,8 @@ async def create_test_subscription(
     db_user_id: int,
     telegram_id: int,
     threexui: ThreeXUIClient,
+    backend_key: str = "default",
+    backend_inbound_id: int = 1,
 ) -> asyncpg.Record:
     """
     Create a short-lived test VPN subscription for the user.
@@ -116,6 +122,7 @@ async def create_test_subscription(
         expire_days=1,
         total_gb=0,
         remark=f"test_{telegram_id}",
+        inbound_id=backend_inbound_id,
     )
 
     expires_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1)
@@ -131,10 +138,12 @@ async def create_test_subscription(
                 threexui_sub_id,
                 subscription_url,
                 subscription_json_url,
+                backend_key,
+                backend_inbound_id,
                 config,
                 is_active,
                 expires_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, $8)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10)
             RETURNING *;
             """,
             db_user_id,
@@ -143,6 +152,8 @@ async def create_test_subscription(
             client_info.sub_id,
             client_info.subscription_url,
             client_info.subscription_json_url,
+            backend_key,
+            backend_inbound_id,
             client_info.config_text,
             expires_at,
         )
@@ -161,6 +172,8 @@ async def create_subscription_from_tariff(
     tariff_id: int | None = None,
     tariff_price_stars: int | None = None,
     device_os: str | None = None,
+    backend_key: str = "default",
+    backend_inbound_id: int = 1,
 ) -> asyncpg.Record:
     """Создать обычную VPN-подписку по тарифу."""
     expire_days = _resolve_duration_days(months, tariff_name)
@@ -172,6 +185,7 @@ async def create_subscription_from_tariff(
         expire_days=expire_days,
         total_gb=total_gb,
         remark=_build_device_remark(telegram_id, device_os, device_sequence),
+        inbound_id=backend_inbound_id,
     )
 
     expires_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=expire_days)
@@ -187,6 +201,8 @@ async def create_subscription_from_tariff(
                 threexui_sub_id,
                 subscription_url,
                 subscription_json_url,
+                backend_key,
+                backend_inbound_id,
                 config,
                 is_active,
                 expires_at,
@@ -196,7 +212,7 @@ async def create_subscription_from_tariff(
                 tariff_price_stars,
                 tariff_months,
                 tariff_traffic_gb
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, $8, $9, $10, $11, $11, $12, $13)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10, $11, $12, $13, $13, $14, $15)
             RETURNING *;
             """,
             db_user_id,
@@ -205,6 +221,8 @@ async def create_subscription_from_tariff(
             client_info.sub_id,
             client_info.subscription_url,
             client_info.subscription_json_url,
+            backend_key,
+            backend_inbound_id,
             client_info.config_text,
             expires_at,
             device_os,
@@ -247,6 +265,7 @@ async def extend_subscription_for_user(
     traffic_gb: int | None = None,
     tariff_id: int | None = None,
     tariff_price_stars: int | None = None,
+    backend_inbound_id: int | None = None,
 ) -> Optional[asyncpg.Record]:
     """Продлить существующую подписку по сохраненным параметрам тарифа."""
     pool = await get_pool()
@@ -265,8 +284,9 @@ async def extend_subscription_for_user(
             expire_days = _resolve_duration_days(months, tariff_name)
         else:
             expire_days = _resolve_duration_days(months, row.get("server_label"))
+        inbound_id = int(row.get("backend_inbound_id") or backend_inbound_id or 1)
         updated = await threexui.extend_client(
-            INBOUND_ID_FOR_SYNC,
+            inbound_id,
             client_id,
             add_days=expire_days,
             add_total_gb=traffic_gb,

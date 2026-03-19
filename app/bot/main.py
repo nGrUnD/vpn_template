@@ -8,8 +8,13 @@ from aiogram.enums import ParseMode
 
 from app.config import load_config
 from app.db import init_db, close_db
-from app.threexui_client import ThreeXUIClient
 from app.bot.handlers.basic import router as basic_router
+from app.services.backends import (
+    build_threexui_registry,
+    close_threexui_registry,
+    get_default_threexui_client,
+)
+from app.threexui_client import ThreeXUIClient
 from app.webapp.server import create_web_app
 
 
@@ -25,8 +30,16 @@ async def run_bot(bot: Bot, dp: Dispatcher, threexui_client: ThreeXUIClient) -> 
     await dp.start_polling(bot, threexui=threexui_client)
 
 
-async def run_web(bot: Bot, threexui_client: ThreeXUIClient, port: int, admin_ids: list[int]) -> None:
-    app = create_web_app(threexui_client, admin_ids, bot)
+async def run_web(
+    bot: Bot,
+    threexui_client: ThreeXUIClient,
+    threexui_registry: dict[str, ThreeXUIClient],
+    threexui_backends,
+    default_threexui_key: str,
+    port: int,
+    admin_ids: list[int],
+) -> None:
+    app = create_web_app(threexui_client, threexui_registry, threexui_backends, default_threexui_key, admin_ids, bot)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host="0.0.0.0", port=port)
@@ -52,11 +65,14 @@ async def main() -> None:
     )
     dp = Dispatcher()
 
-    threexui_client = ThreeXUIClient(config.threexui)
+    threexui_registry = build_threexui_registry(config)
+    threexui_client = get_default_threexui_client(threexui_registry, config.default_threexui_key)
 
     # В aiogram v3 можно прокидывать объекты через контекст:
     # использование threexui и webapp_url в хендлерах через аргументы функции.
     dp["threexui"] = threexui_client
+    dp["threexui_registry"] = threexui_registry
+    dp["default_threexui_key"] = config.default_threexui_key
     dp["webapp_url"] = config.webapp_url
     dp["admin_ids"] = config.bot.admin_ids
 
@@ -65,10 +81,18 @@ async def main() -> None:
     try:
         await asyncio.gather(
             run_bot(bot, dp, threexui_client),
-            run_web(bot, threexui_client, config.webapp_port, config.bot.admin_ids),
+            run_web(
+                bot,
+                threexui_client,
+                threexui_registry,
+                config.threexui_backends,
+                config.default_threexui_key,
+                config.webapp_port,
+                config.bot.admin_ids,
+            ),
         )
     finally:
-        await threexui_client.close()
+        await close_threexui_registry(threexui_registry)
         await close_db()
         await bot.session.close()
 
