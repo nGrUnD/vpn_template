@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import logging
 from html import escape
 from typing import Any, Dict, List
 
@@ -17,6 +18,7 @@ from app.services.subscriptions import (
     extend_subscription_for_user,
     get_subscription_for_user,
     get_active_subscriptions_by_telegram_id,
+    list_subscriptions_due_for_auto_renewal,
 )
 from app.services.tariffs import (
     create_tariff,
@@ -34,6 +36,8 @@ from app.services.wallet import (
     spend_balance_for_purchase,
 )
 from app.threexui_client import ThreeXUIClient
+
+logger = logging.getLogger(__name__)
 
 
 def _admin_ids(app: web.Application) -> List[int]:
@@ -175,9 +179,10 @@ async def handle_my_configs(request: web.Request) -> web.Response:
                 "subscription_json_url": r.get("subscription_json_url"),
                 "backend_key": r.get("backend_key"),
                 "device_os": r.get("device_os"),
-                "can_extend": bool(r.get("tariff_price_stars")) and bool(r.get("tariff_months")),
+                "can_extend": bool(r.get("tariff_price_stars")),
                 "renew_price_stars": r.get("tariff_price_stars"),
                 "renew_months": r.get("tariff_months"),
+                "auto_renew": bool(r.get("auto_renew")),
                 "traffic_value": traffic_value,
                 "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
@@ -354,6 +359,132 @@ async def handle_purchase_tariff(request: web.Request) -> web.Response:
     )
 
 
+async def _extend_subscription_core(
+    app: web.Application,
+    *,
+    telegram_id: int,
+    subscription_id: int,
+    tariff_id: int = 0,
+    username: str | None = None,
+    first_name: str | None = None,
+    last_name: str | None = None,
+) -> Dict[str, Any]:
+    """Продление по сохранённому тарифу подписки (или по tariff_id, если передан)."""
+    user = await get_or_create_user_by_telegram_id(
+        telegram_id=telegram_id,
+        username=username,
+        first_name=first_name,
+        last_name=last_name,
+    )
+    subscription_row = await get_subscription_for_user(subscription_id, telegram_id)
+    if not subscription_row:
+        return {"ok": False, "error": "Подписка не найдена", "http_status": 404}
+    renew_price_stars = int((subscription_row["effective_tariff_price_stars"] or 0))
+    renew_months = int(subscription_row["effective_tariff_months"] or 0)
+    renew_traffic_gb = int(subscription_row["effective_tariff_traffic_gb"] or 0)
+    effective_tariff_id = subscription_row.get("tariff_id")
+    if tariff_id:
+        tariff = await get_tariff_by_id(tariff_id)
+        if not tariff or not tariff["is_active"]:
+            return {"ok": False, "error": "Тариф не найден", "http_status": 404}
+        renew_price_stars = int(tariff["price_stars"])
+        renew_months = int(tariff["months"])
+        renew_traffic_gb = int(tariff["traffic_gb"])
+        effective_tariff_id = int(tariff["id"])
+    if renew_price_stars <= 0:
+        return {"ok": False, "error": "Не задана цена продления для подписки", "http_status": 400}
+    ok, balance = await spend_balance_for_purchase(
+        user["id"],
+        renew_price_stars,
+        f"Продление подписки #{subscription_id}",
+    )
+    if not ok:
+        return {"ok": False, "error": "Недостаточно средств", "balance": balance, "http_status": 400}
+
+    try:
+        backend_key = str(subscription_row.get("backend_key") or _default_backend_key(app))
+        backend_inbound_id = int(subscription_row.get("backend_inbound_id") or 1)
+        subscription = await extend_subscription_for_user(
+            subscription_id=subscription_id,
+            telegram_id=telegram_id,
+            threexui=_resolve_threexui_client(app, backend_key),
+            months=renew_months,
+            traffic_gb=renew_traffic_gb,
+            tariff_id=effective_tariff_id,
+            tariff_price_stars=renew_price_stars,
+            backend_inbound_id=backend_inbound_id,
+        )
+    except Exception:
+        subscription = None
+    if not subscription:
+        balance = await refund_purchase(user["id"], renew_price_stars, f"Возврат за продление подписки #{subscription_id}")
+        return {"ok": False, "error": "Не удалось продлить подписку", "balance": balance, "http_status": 500}
+
+    return {
+        "ok": True,
+        "balance": balance,
+        "expires_at": subscription["expires_at"].isoformat() if subscription["expires_at"] else None,
+        "http_status": 200,
+    }
+
+
+async def process_auto_renewals(app: web.Application) -> None:
+    rows = await list_subscriptions_due_for_auto_renewal()
+    for row in rows:
+        sid = int(row["id"])
+        tid = int(row["telegram_id"])
+        try:
+            result = await _extend_subscription_core(app, telegram_id=tid, subscription_id=sid, tariff_id=0)
+            if result.get("ok"):
+                logger.info("Автопродление: подписка %s, пользователь %s", sid, tid)
+            else:
+                logger.warning(
+                    "Автопродление не выполнено: подписка %s, пользователь %s — %s",
+                    sid,
+                    tid,
+                    result.get("error"),
+                )
+        except Exception:
+            logger.exception("Ошибка автопродления подписки %s", sid)
+
+
+async def auto_renew_background_loop(app: web.Application) -> None:
+    try:
+        while True:
+            await process_auto_renewals(app)
+            await asyncio.sleep(300)
+    except asyncio.CancelledError:
+        raise
+
+
+async def handle_set_subscription_auto_renew(request: web.Request) -> web.Response:
+    try:
+        data: Dict[str, Any] = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+    telegram_id = int(data.get("telegram_id", 0) or 0)
+    subscription_id = int(data.get("subscription_id", 0) or 0)
+    auto_renew = bool(data.get("auto_renew", False))
+    if not telegram_id or not subscription_id:
+        return web.json_response({"ok": False, "error": "Некорректный запрос"}, status=400)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        n = await conn.execute(
+            """
+            UPDATE subscriptions s
+            SET auto_renew = $3
+            FROM users u
+            WHERE s.id = $1 AND u.id = s.user_id AND u.telegram_id = $2
+            """,
+            subscription_id,
+            telegram_id,
+            auto_renew,
+        )
+    if n == "UPDATE 0":
+        return web.json_response({"ok": False, "error": "Подписка не найдена"}, status=404)
+    return web.json_response({"ok": True, "auto_renew": auto_renew})
+
+
 async def handle_extend_subscription(request: web.Request) -> web.Response:
     try:
         data: Dict[str, Any] = await request.json()
@@ -366,63 +497,18 @@ async def handle_extend_subscription(request: web.Request) -> web.Response:
     if not telegram_id or not subscription_id:
         return web.json_response({"ok": False, "error": "Invalid renew request"}, status=400)
 
-    user = await get_or_create_user_by_telegram_id(
+    result = await _extend_subscription_core(
+        request.app,
         telegram_id=telegram_id,
+        subscription_id=subscription_id,
+        tariff_id=tariff_id,
         username=data.get("username"),
         first_name=data.get("first_name"),
         last_name=data.get("last_name"),
     )
-    subscription_row = await get_subscription_for_user(subscription_id, telegram_id)
-    if not subscription_row:
-        return web.json_response({"ok": False, "error": "Подписка не найдена"}, status=404)
-    renew_price_stars = int((subscription_row["effective_tariff_price_stars"] or 0))
-    renew_months = int(subscription_row["effective_tariff_months"] or 0)
-    renew_traffic_gb = int(subscription_row["effective_tariff_traffic_gb"] or 0)
-    effective_tariff_id = subscription_row.get("tariff_id")
-    if tariff_id:
-        tariff = await get_tariff_by_id(tariff_id)
-        if not tariff or not tariff["is_active"]:
-            return web.json_response({"ok": False, "error": "Тариф не найден"}, status=404)
-        renew_price_stars = int(tariff["price_stars"])
-        renew_months = int(tariff["months"])
-        renew_traffic_gb = int(tariff["traffic_gb"])
-        effective_tariff_id = int(tariff["id"])
-    if renew_price_stars <= 0 or renew_months <= 0:
-        return web.json_response({"ok": False, "error": "Выберите тариф для продления"}, status=400)
-    ok, balance = await spend_balance_for_purchase(
-        user["id"],
-        renew_price_stars,
-        f"Продление подписки #{subscription_id}",
-    )
-    if not ok:
-        return web.json_response({"ok": False, "error": "Недостаточно средств", "balance": balance}, status=400)
-
-    try:
-        backend_key = str(subscription_row.get("backend_key") or _default_backend_key(request.app))
-        backend_inbound_id = int(subscription_row.get("backend_inbound_id") or 1)
-        subscription = await extend_subscription_for_user(
-            subscription_id=subscription_id,
-            telegram_id=telegram_id,
-            threexui=_resolve_threexui_client(request.app, backend_key),
-            months=renew_months,
-            traffic_gb=renew_traffic_gb,
-            tariff_id=effective_tariff_id,
-            tariff_price_stars=renew_price_stars,
-            backend_inbound_id=backend_inbound_id,
-        )
-    except Exception:
-        subscription = None
-    if not subscription:
-        balance = await refund_purchase(user["id"], renew_price_stars, f"Возврат за продление подписки #{subscription_id}")
-        return web.json_response({"ok": False, "error": "Не удалось продлить подписку", "balance": balance}, status=500)
-
-    return web.json_response(
-        {
-            "ok": True,
-            "balance": balance,
-            "expires_at": subscription["expires_at"].isoformat() if subscription["expires_at"] else None,
-        }
-    )
+    status = int(result.get("http_status", 200))
+    body = {k: v for k, v in result.items() if k != "http_status"}
+    return web.json_response(body, status=status)
 
 
 async def handle_create_test_client(request: web.Request) -> web.Response:
@@ -2989,7 +3075,61 @@ async def handle_index(request: web.Request) -> web.Response:
     .config-card .detail-label { font-size: 12px; color: var(--hint, #94a3b8); }
     .config-card .detail-value { font-size: 13px; font-weight: 700; color: var(--text, #f8fafc); }
     .config-card .config-preview { font-size: 11px; color: var(--hint); word-break: break-all; max-height: 40px; overflow: hidden; }
-    .config-card .actions { margin-top: 10px; display: flex; gap: 8px; }
+    .config-card .actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .config-card .auto-renew-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      width: 100%;
+      margin-top: 4px;
+      padding: 2px 0;
+    }
+    .config-card .auto-renew-label { font-size: 13px; font-weight: 600; color: var(--text, #e5e7eb); }
+    .config-card .auto-renew-hint { font-size: 11px; color: var(--hint, #94a3b8); margin-top: 2px; }
+    .auto-renew-switch {
+      position: relative;
+      display: inline-block;
+      width: 48px;
+      height: 28px;
+      flex-shrink: 0;
+    }
+    .auto-renew-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+      position: absolute;
+    }
+    .auto-renew-slider {
+      position: absolute;
+      cursor: pointer;
+      inset: 0;
+      background: var(--border, #334155);
+      border-radius: 999px;
+      transition: 0.2s;
+    }
+    .auto-renew-slider:before {
+      content: "";
+      position: absolute;
+      height: 22px;
+      width: 22px;
+      left: 3px;
+      bottom: 3px;
+      background: #fff;
+      border-radius: 50%;
+      transition: 0.2s;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+    }
+    .auto-renew-switch input:checked + .auto-renew-slider {
+      background: var(--button, #5288c1);
+    }
+    .auto-renew-switch input:checked + .auto-renew-slider:before {
+      transform: translateX(20px);
+    }
+    .auto-renew-switch input:disabled + .auto-renew-slider {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
     .config-card .actions button {
       flex: 1;
       border-radius: 8px;
@@ -3555,8 +3695,6 @@ async def handle_index(request: web.Request) -> web.Response:
     const telegramId = user ? user.id : null;
     let selectedDeviceOs = null;
     let currentBalance = 0;
-    let tariffsModalMode = "buy";
-    let renewalSubscriptionId = null;
 
     function toast(msg) {
       const el = document.getElementById("toast");
@@ -3629,7 +3767,7 @@ async def handle_index(request: web.Request) -> web.Response:
         btn.classList.toggle("active", btn.dataset.os === selectedDeviceOs);
       });
       document.querySelectorAll(".tariff-card button").forEach(function(btn) {
-        btn.textContent = tariffsModalMode === "renew" ? "Продлить" : "Купить";
+        btn.textContent = "Купить";
       });
     }
 
@@ -3663,22 +3801,17 @@ async def handle_index(request: web.Request) -> web.Response:
       const root = document.getElementById("tariffs");
       root.innerHTML = tariffs.map(function(t) {
         const badge = t.badge ? '<span class="badge">' + t.badge + '</span>' : '';
-        const buttonLabel = tariffsModalMode === "renew" ? "Продлить" : "Купить";
         return '<div class="tariff-card">' +
           '<div class="name">' + tariffTitle(t) + '</div>' +
           '<div class="meta">' + (t.duration_label || t.name) + ' · ' + t.traffic_gb + ' GB трафика</div>' +
           '<div class="price">' + t.price_stars + ' ⭐' + badge + '</div>' +
-          '<button type="button" data-tariff-id="' + t.id + '">' + buttonLabel + '</button>' +
+          '<button type="button" data-tariff-id="' + t.id + '">Купить</button>' +
           '<div class="hint">Списывается со Stars-баланса</div>' +
           '</div>';
       }).join("");
       root.querySelectorAll("button").forEach(function(btn) {
         btn.addEventListener("click", function() {
-          if (tariffsModalMode === "renew") {
-            renewSubscription(btn, renewalSubscriptionId, btn.dataset.tariffId);
-          } else {
-            buyTariff(btn, btn.dataset.tariffId);
-          }
+          buyTariff(btn, btn.dataset.tariffId);
         });
       });
     }
@@ -3847,8 +3980,14 @@ async def handle_index(request: web.Request) -> web.Response:
         const exp = formatDateRu(c.expires_at);
         const preview = escapeHtml((c.config || "").substring(0, 60) + (c.config && c.config.length > 60 ? "…" : ""));
         const os = c.device_os ? c.device_os + " · " : "";
-        var renewBtn = '<button type="button" class="renew-btn">Продлить</button>';
-        return '<div class="config-card" data-id="' + c.id + '" data-renew-price="' + (c.renew_price_stars || '') + '" data-renew-months="' + (c.renew_months || '') + '">' +
+        const canExt = !!c.can_extend;
+        const priceStars = c.renew_price_stars != null ? c.renew_price_stars : "";
+        var renewBtn = canExt
+          ? '<button type="button" class="renew-btn">Продлить' + (priceStars !== "" ? " · " + priceStars + " ⭐" : "") + '</button>'
+          : "";
+        var arDisabled = canExt ? "" : " disabled";
+        var arChecked = c.auto_renew ? " checked" : "";
+        return '<div class="config-card" data-id="' + c.id + '">' +
           '<div class="head"><div class="label">Конфиг · ' + escapeHtml(os + (c.server_label || ("#" + c.id))) + '</div><div class="open-hint">›</div></div>' +
           '<div class="details">' +
           '<div class="detail-row"><span class="detail-label">Действует до</span><span class="detail-value">' + escapeHtml(exp) + '</span></div>' +
@@ -3856,8 +3995,15 @@ async def handle_index(request: web.Request) -> web.Response:
           '</div>' +
           '<div class="config-preview">' + preview + '</div>' +
           '<div class="actions">' +
-          '<button type="button" class="primary copy-btn">Скопировать</button>' +
+          '<button type="button" class="primary copy-btn">Скопировать ключ</button>' +
           renewBtn +
+          '<div class="auto-renew-row">' +
+          '<div><div class="auto-renew-label">Автопродление</div><div class="auto-renew-hint">За сутки до окончания списывается стоимость периода</div></div>' +
+          '<label class="auto-renew-switch">' +
+          '<input type="checkbox" class="auto-renew-toggle" data-id="' + c.id + '"' + arChecked + arDisabled + ' />' +
+          '<span class="auto-renew-slider"></span>' +
+          '</label>' +
+          '</div>' +
           '</div></div>';
       }).join("");
       root.querySelectorAll(".config-card").forEach(function(card) {
@@ -3879,11 +4025,28 @@ async def handle_index(request: web.Request) -> web.Response:
         btn.addEventListener("click", function(event) {
           event.stopPropagation();
           const card = btn.closest(".config-card");
-          renewalSubscriptionId = parseInt(card.getAttribute("data-id"), 10);
-          tariffsModalMode = "renew";
-          var modalTitle = document.getElementById("modal-device-title");
-          if (modalTitle) modalTitle.textContent = "Продление конфигурации";
-          showTariffsModal();
+          renewalSubscriptionDirect(parseInt(card.getAttribute("data-id"), 10), btn);
+        });
+      });
+      root.querySelectorAll(".auto-renew-row").forEach(function(row) {
+        row.addEventListener("click", function(event) { event.stopPropagation(); });
+      });
+      root.querySelectorAll(".auto-renew-toggle").forEach(function(cb) {
+        cb.addEventListener("click", function(event) { event.stopPropagation(); });
+        cb.addEventListener("change", function() {
+          var id = parseInt(cb.getAttribute("data-id"), 10);
+          var want = cb.checked;
+          apiPost("/api/subscriptions/auto-renew", payloadBase({ subscription_id: id, auto_renew: want }))
+            .then(function(data) {
+              if (!data.ok) {
+                cb.checked = !want;
+                toast(data.error || "Не удалось сохранить");
+              }
+            })
+            .catch(function() {
+              cb.checked = !want;
+              toast("Ошибка сети");
+            });
         });
       });
     }
@@ -3990,15 +4153,14 @@ async def handle_index(request: web.Request) -> web.Response:
         });
     }
 
-    function renewSubscription(btn, subscriptionId, tariffId) {
+    function renewalSubscriptionDirect(subscriptionId, btn) {
       if (!telegramId) { toast("Ошибка: нет данных пользователя"); return; }
       btn.disabled = true;
-      apiPost("/api/subscriptions/extend", payloadBase({ subscription_id: subscriptionId, tariff_id: parseInt(tariffId, 10) }))
+      apiPost("/api/subscriptions/extend", payloadBase({ subscription_id: subscriptionId }))
         .then(function(data) {
           btn.disabled = false;
           if (data.ok) {
             toast("Подписка продлена");
-            hideTariffsModal();
             loadDashboard();
             loadWallet();
             loadConfigs();
@@ -4056,8 +4218,6 @@ async def handle_index(request: web.Request) -> web.Response:
     }
     function hideTariffsModal() {
       document.getElementById("tariffs-modal").classList.remove("show");
-      tariffsModalMode = "buy";
-      renewalSubscriptionId = null;
       var modalTitle = document.getElementById("modal-device-title");
       if (modalTitle) modalTitle.textContent = selectedDeviceOs ? ("Устройство: " + selectedDeviceOs) : "Выберите тариф";
     }
@@ -4081,8 +4241,6 @@ async def handle_index(request: web.Request) -> web.Response:
       btn.addEventListener("click", function() {
         setSelectedDevice(btn.dataset.os);
         document.getElementById("device-chooser").classList.remove("show");
-        tariffsModalMode = "buy";
-        renewalSubscriptionId = null;
         showTariffsModal();
       });
     });
@@ -4129,6 +4287,7 @@ def create_web_app(
     app.router.add_post("/api/wallet/cancel-invoice", handle_wallet_cancel_invoice)
     app.router.add_post("/api/purchase-tariff", handle_purchase_tariff)
     app.router.add_post("/api/subscriptions/extend", handle_extend_subscription)
+    app.router.add_post("/api/subscriptions/auto-renew", handle_set_subscription_auto_renew)
     app.router.add_post("/api/my-configs", handle_my_configs)
     app.router.add_post("/api/create-test-client", handle_create_test_client)
     # Admin

@@ -15,7 +15,7 @@ from app.services.backends import (
     get_default_threexui_client,
 )
 from app.threexui_client import ThreeXUIClient
-from app.webapp.server import create_web_app
+from app.webapp.server import auto_renew_background_loop, create_web_app
 
 
 logging.basicConfig(
@@ -46,11 +46,16 @@ async def run_web(
     logger.info("Starting WebApp server on http://0.0.0.0:%s", port)
     await site.start()
 
-    # Keep running until cancelled
+    renew_task = asyncio.create_task(auto_renew_background_loop(app))
     try:
         while True:
             await asyncio.sleep(3600)
     finally:
+        renew_task.cancel()
+        try:
+            await renew_task
+        except asyncio.CancelledError:
+            pass
         await runner.cleanup()
 
 

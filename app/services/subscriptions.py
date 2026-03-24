@@ -78,7 +78,8 @@ async def get_active_subscriptions_by_telegram_id(
                 COALESCE(s.tariff_traffic_gb, t.traffic_gb) AS tariff_traffic_gb,
                 s.is_active,
                 s.expires_at,
-                s.created_at
+                s.created_at,
+                COALESCE(s.auto_renew, FALSE) AS auto_renew
             FROM subscriptions s
             JOIN users u ON u.id = s.user_id
             LEFT JOIN tariffs t ON t.id = s.tariff_id OR (s.tariff_id IS NULL AND t.name = s.server_label)
@@ -233,6 +234,27 @@ async def create_subscription_from_tariff(
         )
 
     return row
+
+
+async def list_subscriptions_due_for_auto_renewal() -> list[asyncpg.Record]:
+    """
+    Подписки с включённым автопродлением, срок которых истекает в течение 24 ч или уже истёк.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetch(
+            """
+            SELECT s.id, u.telegram_id
+            FROM subscriptions s
+            JOIN users u ON u.id = s.user_id
+            WHERE COALESCE(s.auto_renew, FALSE) = TRUE
+              AND s.is_active = TRUE
+              AND s.expires_at IS NOT NULL
+              AND s.expires_at <= NOW() + INTERVAL '24 hours'
+              AND s.threexui_client_id IS NOT NULL
+            ORDER BY s.expires_at ASC
+            """
+        )
 
 
 async def get_subscription_for_user(subscription_id: int, telegram_id: int) -> Optional[asyncpg.Record]:

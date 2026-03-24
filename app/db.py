@@ -169,6 +169,12 @@ async def init_db(db_config: DatabaseConfig) -> None:
             CREATE INDEX IF NOT EXISTS idx_subscriptions_backend_key ON subscriptions(backend_key);
             """
         )
+        await conn.execute(
+            """
+            ALTER TABLE subscriptions
+            ADD COLUMN IF NOT EXISTS auto_renew BOOLEAN NOT NULL DEFAULT FALSE;
+            """
+        )
 
         await conn.execute(
             """
