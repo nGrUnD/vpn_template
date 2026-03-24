@@ -11,10 +11,18 @@ from app.threexui_client import ThreeXUIClient, ThreeXUIClientInfo
 
 
 def _resolve_duration_days(months: int | None, tariff_name: str | None) -> int:
+    """
+    Длительность периода в днях. Для тарифов с months > 0 — месяцы по 30 дней.
+    Для months == 0 (короткие тарифы вроде «3 дня») — по названию тарифа из БД,
+    а не по server_label устройства (оно может быть «Android» и т.п.).
+    """
+    m = int(months or 0)
     name = (tariff_name or "").strip().lower()
-    if "3 дня" in name:
+    if m > 0:
+        return m * 30
+    if "3 дня" in name or "3 days" in name or "3 day" in name:
         return 3
-    return max(int(months or 0), 1) * 30
+    return 30
 
 
 def _build_device_label(device_os: str | None, sequence: int) -> str | None:
@@ -265,6 +273,7 @@ async def get_subscription_for_user(subscription_id: int, telegram_id: int) -> O
             SELECT
                 s.*,
                 u.telegram_id,
+                t.name AS tariff_name,
                 COALESCE(s.tariff_price_stars, s.tariff_price_rub, t.price_stars, t.price_rub) AS effective_tariff_price_stars,
                 COALESCE(s.tariff_months, t.months) AS effective_tariff_months,
                 COALESCE(s.tariff_traffic_gb, t.traffic_gb) AS effective_tariff_traffic_gb
@@ -299,13 +308,10 @@ async def extend_subscription_for_user(
         months = int(months if months is not None else (row["effective_tariff_months"] or 0))
         traffic_gb = int(traffic_gb if traffic_gb is not None else (row["effective_tariff_traffic_gb"] or 0))
         client_id = row["threexui_client_id"]
-        if months <= 0 or not client_id:
-            tariff_name = row.get("server_label")
-            if not client_id:
-                return None
-            expire_days = _resolve_duration_days(months, tariff_name)
-        else:
-            expire_days = _resolve_duration_days(months, row.get("server_label"))
+        if not client_id:
+            return None
+        tariff_name_for_duration = row.get("tariff_name") or row.get("server_label")
+        expire_days = _resolve_duration_days(months, tariff_name_for_duration)
         inbound_id = int(row.get("backend_inbound_id") or backend_inbound_id or 1)
         updated = await threexui.extend_client(
             inbound_id,

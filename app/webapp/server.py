@@ -954,18 +954,21 @@ async def _admin_extend_subscription_manual(
 
 
 async def _admin_deactivate_subscription(subscription_id: int) -> bool:
+    """
+    Удаляет запись подписки из БД. Не обращается к 3x-ui (клиент там может уже отсутствовать).
+    Используем DELETE … RETURNING вместо проверки тега команды execute() — надёжнее на разных версиях asyncpg.
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
-        result = await conn.execute(
+        row = await conn.fetchrow(
             """
-            UPDATE subscriptions
-            SET is_active = FALSE,
-                expires_at = NOW()
+            DELETE FROM subscriptions
             WHERE id = $1
+            RETURNING id
             """,
             subscription_id,
         )
-    return result == "UPDATE 1"
+    return row is not None
 
 
 async def _admin_fetch_users_data(limit: int = 50, q: str = "", segment: str = "") -> Dict[str, Any]:
@@ -1314,7 +1317,7 @@ def _admin_device_row_html(row: Dict[str, Any], *, redirect_query: str = "") -> 
         "<td><div class=\"cell-actions\">"
         f"<a class=\"btn\" href=\"/admin/devices?q={row['telegram_id']}\">Все устройства</a>"
         f"<form method=\"post\" action=\"/admin/devices/{row['id']}/extend\" class=\"mini-form\">{redirect_input}<input type=\"number\" name=\"days\" min=\"1\" value=\"30\" /><button type=\"submit\" class=\"primary\">Продлить</button></form>"
-        f"<form method=\"post\" action=\"/admin/devices/{row['id']}/deactivate\" class=\"mini-form\" onsubmit=\"return confirm('Деактивировать устройство?');\">{redirect_input}<button type=\"submit\" class=\"danger\">Деактивировать</button></form>"
+        f"<form method=\"post\" action=\"/admin/devices/{row['id']}/deactivate\" class=\"mini-form\" onsubmit=\"return confirm('Удалить запись об этом устройстве из базы? Конфиг в панели 3x-ui не трогаем.');\">{redirect_input}<button type=\"submit\" class=\"danger\">Удалить из БД</button></form>"
         "</div></td>"
         "</tr>"
     )
@@ -1328,7 +1331,7 @@ def _admin_notice_html(status: str | None = None, error: str | None = None) -> s
     if status == "device_extended":
         return '<div class="notice success">Подписка продлена вручную</div>'
     if status == "device_deactivated":
-        return '<div class="notice success">Устройство деактивировано</div>'
+        return '<div class="notice success">Запись об устройстве удалена из базы данных</div>'
     if status == "user_balance_updated":
         return '<div class="notice success">Баланс пользователя обновлен</div>'
     if error == "required":
@@ -2825,6 +2828,7 @@ async def handle_admin_device_deactivate(request: web.Request) -> web.Response:
     try:
         ok = await _admin_deactivate_subscription(subscription_id)
     except Exception:
+        logger.exception("admin device delete failed subscription_id=%s", subscription_id)
         ok = False
     if not ok:
         raise web.HTTPSeeOther(base + ("&" if redirect else "?") + "error=server")
@@ -3775,9 +3779,11 @@ async def handle_index(request: web.Request) -> web.Response:
       currentBalance = balance || 0;
       document.getElementById("vpn-balance-main").textContent = currentBalance + " ⭐";
       document.getElementById("wallet-balance").textContent = currentBalance + " ⭐";
-      document.getElementById("vpn-device-meta").textContent = deviceCount > 0
-        ? "Активных устройств: " + deviceCount
-        : "Нет активных устройств";
+      if (typeof deviceCount === "number") {
+        document.getElementById("vpn-device-meta").textContent = deviceCount > 0
+          ? "Активных устройств: " + deviceCount
+          : "Нет активных устройств";
+      }
     }
 
     function tariffRubLabel(tariff) {
@@ -4133,6 +4139,9 @@ async def handle_index(request: web.Request) -> web.Response:
           btn.closest(".tariffs").classList.remove("loading");
           btn.disabled = false;
           if (data.ok) {
+            if (typeof data.balance === "number") {
+              updateBalanceViews(data.balance);
+            }
             toast("Устройство добавлено");
             hideTariffsModal();
             loadDashboard();
@@ -4159,6 +4168,9 @@ async def handle_index(request: web.Request) -> web.Response:
       apiPost("/api/subscriptions/extend", payloadBase({ subscription_id: subscriptionId }))
         .then(function(data) {
           btn.disabled = false;
+          if (typeof data.balance === "number") {
+            updateBalanceViews(data.balance);
+          }
           if (data.ok) {
             toast("Подписка продлена");
             loadDashboard();
